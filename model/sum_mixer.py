@@ -7,5 +7,5 @@ class VDNMixer(nn.Module):
     def __init__(self):
         super(VDNMixer, self).__init__()
 
-    def forward(self, agent_qs, states):
-        return torch.sum(agent_qs, dim=2, keepdim=True)
+    def forward(self, agent_qs, states=None):
+        return torch.sum(agent_qs, dim=2, keepdim=True)  # set dim=2 to retain batches

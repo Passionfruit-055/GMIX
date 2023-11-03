@@ -1,6 +1,7 @@
 import warnings
+
 from .mylogger import logger
-from algo import *
+from algo.qmix import QmixAgent
 
 
 def get_config(config, key, default, warning=None):
@@ -34,7 +35,8 @@ def make_env(config):
         scenario_config = {'agent_num': env.max_num_agents,
                            'obs_space': env.observation_space(agent_0_id).shape[0],
                            'action_space': env.action_space(agent_0_id).n,
-                           'state_space': env.state_space.shape[0]
+                           'state_space': env.state_space.shape[0],
+                           'scenario': env_name + '_' + map_name
                            }
         config.update(scenario_config)
 
@@ -47,6 +49,7 @@ def make_env(config):
 
     return env, config
 
-def build_model(config):
-    return model,
 
+def build_model(config):
+    q_agent = QmixAgent(config)
+    return q_agent, config

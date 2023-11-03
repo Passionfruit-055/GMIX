@@ -20,5 +20,5 @@ class MLP(nn.Module):
     def forward(self, state):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
-        output = self.fc3(x)
+        output = F.relu(self.fc3(x))
         return output

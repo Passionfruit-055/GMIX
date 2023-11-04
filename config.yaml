@@ -9,19 +9,22 @@ experiment:
     max_timestep: 100
     save_cycle: 800
     target_model_update_cycle: 500
+    buffer_size: 128
+    batch_size: 32
 
 model:
   input_dim: None
   output_dim: None
   hidden_l1_dim: 64
   hidden_l2_dim: 128
-  optimizer: 'rmsprop'
+  optimizer: 'rmsprop' #adam
   loss: 'mse'
   algo: 'qmix' # 'vdn', 'iql'
   alpha: 0.001 # lr for optimizer
   gamma: 0.8 # lr for future reward
   phi: 0.5 # factor for balance g_values
   guide: True # whether to use guide
+  beta: 2 # factor control long-term risk
 
 env:
   env_name: 'mpe' # 'smac'

@@ -1,7 +1,7 @@
 import warnings
 
 from .mylogger import logger
-from algo.qmix import QmixAgent
+from algo.qmix import QMIXAgent
 
 
 def get_config(config, key, default, warning=None):

@@ -83,7 +83,7 @@ class CommAgent(object):
 
         dist = self._measure_dist(pos)
         queue_delay = self._estimate_queue_delay()
-        AoI = np.zeros((self.n_agent, self.n_agent))
+        AoI = self._evaluate_AoI(dist, queue_delay)
 
         for sender in range(self.n_agent):
             ob, pre_hat_ob = obs[sender], pre_hat_obs[sender]
@@ -111,14 +111,27 @@ class CommAgent(object):
                 queue = arrive_seq
         return queue
 
-    def _evaluate_AoI(self, msg, queue):
-        AoI = np.zeros((self.n_agent, self.n_agent))
+    def _evaluate_AoI(self, dist, queue):
+        AoI_template = np.zeros((self.n_agent, self.n_agent))
+        for sender in range(self.n_agent):
+            for receiver in range(sender, self.n_agent):
+                if sender == receiver:
+                    AoI_template[sender][receiver] = sender + 0.5
+                else:
+                    AoI_template[sender][receiver] = max(sender, receiver)
+                AoI_template[receiver][sender] = AoI_template[sender][receiver]
+
+        current_AoI = np.zeros((self.n_agent, self.n_agent))
+        dist_grade = np.arange(self.sigma, step=self.sigma / self.n_agent)
         for sender in range(self.n_agent):
             for receiver in range(self.n_agent):
-                if sender == receiver:
-                    continue
+                dist_index = np.where(dist_grade >= dist[sender][receiver])[0]
+                if dist_index.size == 0:
+                    current_AoI = AoI_template[self.n_agent - 1][self.n_agent - 1]
                 else:
-                    AoI[sender][receiver] = np.sum(queue[receiver] == msg[sender])
+                    q_index = queue[sender][receiver]
+                    current_AoI = AoI_template[dist_index[0]][q_index]
+
         return AoI
 
     def _choose_actions(self, states):
@@ -148,4 +161,13 @@ class CommAgent(object):
 
 
 if __name__ == '__main__':
-    pass
+    n_agent = 5
+    AoI_template = np.zeros((n_agent, n_agent))
+    for sender in range(n_agent):
+        for receiver in range(sender, n_agent):
+            if sender == receiver:
+                AoI_template[sender][receiver] = sender + 0.5
+            else:
+                AoI_template[sender][receiver] = max(sender, receiver)
+            AoI_template[receiver][sender] = AoI_template[sender][receiver]
+    print(AoI_template)

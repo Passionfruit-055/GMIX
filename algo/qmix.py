@@ -1,10 +1,12 @@
+import random
+
 import numpy as np
 
 from model.rnn import RNN
 from model.monotonic_mixer import QMixer
 from model.mlp_nonnegative import MLP
 from model.sum_mixer import VDNMixer as GMixer
-from marl.ReplayBuffer import ReplayBuffer
+from marl.ReplayBuffer import MAReplayBuffer
 
 import logging
 
@@ -28,14 +30,15 @@ class QMIXAgent(object):
         self.device = (torch.device("cuda")
                        if torch.cuda.is_available() else torch.device("cpu"))
 
+        self.n_agent = self.config["agent_num"]
         self._build_model()
 
         self._add_optim()
 
         self._add_criterion()
 
-        self.save_cycle = 0
-        self.target_model_update_cycle = 0
+        self.save_cycle = self.config.get("save_cycle", 0)
+        self.target_model_update_cycle = self.config.get("target_model_update_cycle", 0)
         self.current_step = 0
 
         self.hidden_state = None
@@ -45,13 +48,14 @@ class QMIXAgent(object):
         self.beta = config.get("beta", 2)
         self.gamma = config.get("gamma", 0.9)
         self.phi = config.get("phi", 0.5)
+        self.epsilon = config.get("epsilon", 0.2)
 
     def _build_model(self):
         n_agent = self.config["agent_num"]
 
-        obs_space = self.config["obs_space"]
-        action_space = self.config["action_space"]
-        state_space = self.config["state_space"]
+        obs_space = self.obs_space = self.config["obs_space"] + n_agent if self.config.get("share", False) else self.config["obs_space"]
+        action_space = self.action_space = self.config["action_space"]
+        state_space = self.state_space = self.config["state_space"]
 
         hidden_l1_dim = self.config["hidden_l1_dim"]
         hidden_l2_dim = self.config["hidden_l2_dim"]
@@ -74,7 +78,7 @@ class QMIXAgent(object):
             self.gmixer = GMixer().to(self.device)
             self.params.extend(self.gmixer.parameters())
 
-        self.buffer = ReplayBuffer(n_agent, self.config.get('batch_size', 128))
+        self.buffer = MAReplayBuffer(n_agent, self.config.get('batch_size', 128))
 
     def train(self):
         self.current_step += 1
@@ -124,9 +128,9 @@ class QMIXAgent(object):
 
             if distributed_gs is not None:
                 bar_mu = torch.mean(mus[t], dim=0).view(B, 1)
-                eval_g = self.gmixer(distributed_gs, dim=1).detach().cpu()
+                tot_g = self.gmixer(distributed_gs, dim=1).detach().cpu()
                 target_g = bar_mu + self.beta * torch.mean(distributed_gs)
-                gloss = self.criterion(eval_g, target_g)
+                gloss = self.criterion(tot_g, target_g)
                 loss += gloss
 
             self.optimizer.zero_grad()
@@ -142,12 +146,16 @@ class QMIXAgent(object):
 
     def compute_actions(self, obs):
         assert self.hidden_state is not None, "Hidden state hasn't been reset!"
-        obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
-        q_values, self.hidden_state = self.model(obs, self.hidden_state)
-        if self.config.get("guide", False):
-            g_values = self.guide(obs)
-            q_values -= self.phi * g_values
-        actions = torch.argmax(q_values, dim=1).cpu().numpy()
+        obs = torch.tensor(obs, dtype=torch.float64).view(self.n_agent, -1).to(self.device)
+
+        actions = []
+        for a in range(self.n_agent):
+            with torch.no_grad():
+                Qvals, self.hidden_state[a] = self.model(obs[a], self.hidden_state[a])
+            if random.random() > self.epsilon:
+                actions.append(torch.argmax(Qvals[0], dim=0).item())
+            else:
+                actions.append(random.choice(range(self.action_space)))
         return actions
 
     def load_model(self, scenario):
@@ -212,6 +220,8 @@ class QMIXAgent(object):
             for e in experience]
         obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs = experience
         self.buffer.add(obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs)
+
+
 
 
 if __name__ == "__main__":

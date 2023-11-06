@@ -6,7 +6,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 
 
-class ReplayBuffer(object):
+class MAReplayBuffer(object):
     def __init__(self, agent_num, buffer_size=64):
         self.agent_num = agent_num
         self.buffer_size = buffer_size
@@ -43,6 +43,19 @@ class ReplayBuffer(object):
         self.buffer.clear()
 
 
+class ReplayBuffer(object):
+    def __init__(self, buffer_size=64):
+        self.buffer_size = buffer_size
+        self.buffer = deque(maxlen=buffer_size)
+        self.len = len(self.buffer)
+
+    def add(self, states, actions, n_states, rewards, dones):
+        experience = (states, actions, n_states, rewards, dones)
+        self.buffer.append(experience)
+        self.len = len(self.buffer)
+
+
+
 if __name__ == '__main__':
     obs = np.zeros((2, 30, 21))
     short_obs = np.zeros((2, 10, 21))
@@ -56,9 +69,8 @@ if __name__ == '__main__':
     mus = np.zeros((2, 30, 1))
     msgs = None
 
-    buffer = ReplayBuffer(2)
+    buffer = MAReplayBuffer(2)
     for i in range(10):
         buffer.add(random.choice([obs, short_obs]), actions, rewards, n_obs, dones, states, n_states, mus, msgs)
     minibatch = buffer.sample_batch(5, 'cuda:0')
     print(minibatch)
-

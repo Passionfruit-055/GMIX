@@ -50,8 +50,17 @@ class ReplayBuffer(object):
         self.len = len(self.buffer)
 
     def add(self, states, actions, n_states, rewards, dones):
-        experience = (states, actions, n_states, rewards, dones)
+        experience = [states, actions, n_states, rewards, dones]
         self.buffer.append(experience)
+        self.len = len(self.buffer)
+
+    def sample_batch(self, batch_size):
+        assert batch_size <= self.len, "batch_size should be less than memory size"
+        indices = np.random.choice(self.len, batch_size, replace=False)
+        return [self.buffer[index] for index in indices]
+
+    def clear(self):
+        self.buffer.clear()
         self.len = len(self.buffer)
 
 

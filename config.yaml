@@ -30,6 +30,7 @@ model:
   # comm
   comm: True # whether to use comm
   sigma: 3 # communication range
+  share_param: False
 
 
 env:

@@ -49,8 +49,8 @@ class ReplayBuffer(object):
         self.buffer = deque(maxlen=buffer_size)
         self.len = len(self.buffer)
 
-    def add(self, states, actions, rewards, n_states, dones):
-        experience = [states, actions, n_states, rewards, dones]
+    def add(self, states, actions, rewards, n_states):
+        experience = [states, actions, n_states, rewards]
         self.buffer.append(experience)
         self.len = len(self.buffer)
 

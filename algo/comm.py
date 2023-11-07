@@ -1,3 +1,5 @@
+import logging
+
 from model.mlp import MLP
 
 from marl.ReplayBuffer import ReplayBuffer
@@ -49,20 +51,22 @@ class CommAgent(object):
         self.receive = np.ones((self.n_agent,))
 
         self.overhead = np.zeros((self.n_agent,))
+
+        self.modes = np.zeros((self.n_agent,))
         self.rewards = np.zeros((self.n_agent,))
 
         self.memory = ReplayBuffer(buffer_size)
 
-        # pass to GMIX
-        self.modes = []
-        self.obs = None
-        self.msgs = []
+        self.states = None
+        # expanded obs, pass to GMIX
+        self.obs = np.zeros((self.n_agent, self.config["obs_space"]))
 
     def _build_model(self):
 
         self.action_space = action_space = self.config["action_space"] if self.config.get("share_param", False) else \
             self.config["action_space"] + 1
         self.state_space = state_space = self.config["state_space"]
+        assert state_space == (self.config['obs_space'] * 2 + 3), "wrong state space"
 
         hidden_l1_dim = self.config["hidden_l1_dim"]
         hidden_l2_dim = self.config["hidden_l2_dim"]
@@ -74,25 +78,37 @@ class CommAgent(object):
         self.target_model.load_state_dict(self.model.state_dict()).to(self.device)
         self.params.extend(list(self.model.parameters()))
 
-    def communication_round(self, obs, pre_hat_obs, params=None):
+    def communication_round(self, obs, params=None, done=False):
+        # add here to provide a protection
+        if done:
+            logger = logging.getLogger()
+            logger.error("last timestep, should not be stored!")
+            return
+
         self.comm_round += 1
+        states = self.state_formulation(obs, params)
+        # do not save first and last
+        assert self.states is not None, "Ignore first timestep!"
+        # 在这一时刻将上一个时刻的历史存入，当前时刻状态充当下一时刻状态
+        self.memory.add(self.states, self.modes, self.rewards, states)
+        self.states = states
 
-        states = self.state_formulation(obs, pre_hat_obs, params)
+        self.choose_actions(states)
 
-        actions = self.choose_actions(states)
+        self.compute_reward()
 
-        rewards = self.compute_reward(actions)
+        e_obs = self.expand_obs(obs, self.prepare_message(obs, params))
 
-        self.extract_message(obs, pre_hat_obs, params)
-        self.expand_obs(obs)
+        self.obs = obs
 
+        # 不涉及时序，每一个timestep都可以做更新
         self.train()
 
-        self.memory.add(states, actions, rewards, None)
+        return e_obs, self.modes
 
-    def state_formulation(self, pos, obs, pre_hat_obs, params=None):
+    def state_formulation(self, pos, obs, params=None):
         obs = np.array(obs, dtype=np.float32).view((self.n_agent, -1))
-        pre_hat_obs = np.array(pre_hat_obs, dtype=np.float32).view((self.n_agent, -1))
+        self.obs = np.array(self.obs, dtype=np.float32).view((self.n_agent, -1))
         params = np.array(params, dtype=np.float32).view((self.n_agent, -1)) if params is not None else None
 
         dist = self._measure_dist(pos)
@@ -104,12 +120,13 @@ class CommAgent(object):
         onehot = np.eye(self.n_agent)
 
         for sender in range(self.n_agent):
-            ob, pre_hat_ob = obs[sender], pre_hat_obs[sender]
+            ob, pre_ob = obs[sender], self.obs[sender]
             param = params[sender] if params is not None else None
             d_i, q_i, Ao_i = dist[sender], queue_delay[:, sender], AoI[:, sender]
 
-            msg = np.concatenate((ob, pre_hat_ob, param), axis=0)
-            state = np.concatenate((np.max(d_i), np.max(q_i) + np.max(Ao_i) + msg))
+            # msg = np.concatenate((ob, pre_ob, param), axis=0)
+            msg_pool = np.concatenate((ob, pre_ob), axis=0)
+            state = np.concatenate((np.max(d_i), np.max(q_i), np.max(Ao_i), msg_pool))
             state = np.hstack((state, onehot[sender])) if self.config.get("share", False) else state
             states = np.vstack((states, state)) if states is not None else state
 
@@ -129,15 +146,12 @@ class CommAgent(object):
     def _estimate_queue_delay(self):
         # dim=0 (行）receiver, 每一行代表msg到达的次序，不能重复
         q_d = None
-        for sender in range(self.n_agent):
+        for receiver in range(self.n_agent):
             arrive_seq = np.arange(self.n_agent)
             np.random.shuffle(arrive_seq)
             i = np.where(arrive_seq == 0)[0]
-            arrive_seq[sender], arrive_seq[i] = arrive_seq[i], arrive_seq[sender]
-            if q_d is not None:
-                q_d = np.vstack((q_d, arrive_seq))
-            else:
-                q_d = arrive_seq
+            arrive_seq[receiver], arrive_seq[i] = arrive_seq[i], arrive_seq[receiver]
+            q_d = np.vstack((q_d, arrive_seq)) if q_d is not None else arrive_seq
         return q_d
 
     def __generate_AoI_template(self):
@@ -173,25 +187,27 @@ class CommAgent(object):
 
     def choose_actions(self, states):
         states = torch.tensor(states, dtype=torch.float32).to(self.device)
-        actions = []
+
         for a in range(self.n_agent):
             q_values = self.model(states[a])
             if random.random() > self.epsilon:
-                actions.append(torch.argmax(q_values[0], dim=0).item())
+                self.modes[a] = torch.argmax(q_values[0], dim=0).item()
             else:
-                actions.append(random.choice(range(self.action_space)))
-        self.modes = actions
-        return actions
+                self.modes[a] = random.randint(0, self.action_space - 1)
 
-    def extract_message(self, obs, pre_hat_obs, params=None):
+    def prepare_message(self, obs, params=None):
         actions = self.modes
+        assert params is None, "to be developed!"
         msgs = []
         for sender in range(self.n_agent):
-            action, ob, pre_ob = actions[sender], obs[sender], pre_hat_obs[sender]
+            action, ob, pre_ob = actions[sender], obs[sender], self.obs[sender]
+            blank_msg = np.zeros(ob.shape)
             param = params[sender] if params is not None else None
-            msg = [piece for i, piece in enumerate((None, ob, pre_ob, param)) if i <= action]
+            msg_kinds = (blank_msg, pre_ob, ob, (ob, param))
+            msg = msg_kinds[action]
             msgs.append(msg)
-        self.msgs = msgs
+        msgs = np.array(msgs, dtype=np.float32).view((self.n_agent, -1))
+        return msgs
 
     def _receive_permission(self, dist, queue_delay):
         # 利用排队和距离来确定消息能不能发到接受者一方
@@ -209,22 +225,25 @@ class CommAgent(object):
         diagonal[:] = 0
         np.fill_diagonal(self.receive, diagonal)
 
-    def expand_obs(self, obs):
+    def expand_obs(self, obs, msgs):
+        e_obs = None
         for receiver in range(self.n_agent):
             e_ob = obs[receiver].copy()
             for sender in range(self.n_agent):
                 if self.receive[receiver][sender]:
-                    e_ob = np.concatenate((e_ob, self.msgs[sender]), axis=0)
-            self.obs = np.vstack((self.obs, e_ob)) if self.obs is not None else e_ob
+                    e_ob = np.concatenate((e_ob, msgs[sender]), axis=0)
+            e_obs = np.vstack((e_obs, e_ob)) if e_obs is not None else e_ob
+        # 保证每个agent的obs维度一致
+        return e_obs
 
-    def compute_reward(self, modes):
+    def compute_reward(self):
         # encourage to communicate, modes that transmit more infos score higher,AoI to give negative feedback
         o1 = 1
         o2 = 0.5
         o3 = 0.8
         AoI = np.mean(self.AoI_history, axis=1)
-        rewards = o1 * self.rewards + o2 * modes - o3 * AoI
-        return rewards
+        rewards = o1 * self.rewards + o2 * self.modes - o3 * AoI
+        self.rewards = rewards
 
     def _compute_overhead(self, dist, queue_delay):
         for sender in range(self.n_agent):
@@ -288,3 +307,21 @@ if __name__ == '__main__':
     n_agent = 5
     dist = np.random.randint(0, 4, (n_agent, n_agent))
     queue = np.random.randint(0, n_agent, (n_agent, n_agent))
+
+    model = MLP(5, 3)
+    params = model.parameters()
+
+    a = torch.rand((3, 3))
+    print(a.dtype)
+
+    for param in params:
+        type(param.data)
+
+    param_dict = model.state_dict()
+
+    actions = np.random.randint(0, 3, (3,))
+    modes = np.zeros((3,))
+    for a, m in zip(actions, modes):
+        m = a
+    print(modes)
+    print(actions)

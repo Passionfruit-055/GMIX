@@ -49,7 +49,7 @@ class ReplayBuffer(object):
         self.buffer = deque(maxlen=buffer_size)
         self.len = len(self.buffer)
 
-    def add(self, states, actions, n_states, rewards, dones):
+    def add(self, states, actions, rewards, n_states, dones):
         experience = [states, actions, n_states, rewards, dones]
         self.buffer.append(experience)
         self.len = len(self.buffer)
@@ -62,7 +62,6 @@ class ReplayBuffer(object):
     def clear(self):
         self.buffer.clear()
         self.len = len(self.buffer)
-
 
 
 if __name__ == '__main__':

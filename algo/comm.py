@@ -42,12 +42,21 @@ class CommAgent(object):
         buffer_size = self.max_episode = config.get("max_episode", 1000)  # 记录的是一个episode的数据，要够长
 
         self.comm_round = 0
+
         self.AoI_history = None
+        self._AoI_template = self.__generate_AoI_template()
+
+        self.receive = np.ones((self.n_agent,))
 
         self.overhead = np.zeros((self.n_agent,))
         self.rewards = np.zeros((self.n_agent,))
 
         self.memory = ReplayBuffer(buffer_size)
+
+        # pass to GMIX
+        self.modes = []
+        self.obs = None
+        self.msgs = []
 
     def _build_model(self):
 
@@ -65,27 +74,21 @@ class CommAgent(object):
         self.target_model.load_state_dict(self.model.state_dict()).to(self.device)
         self.params.extend(list(self.model.parameters()))
 
-    def _add_optim(self):
-        config = self.config
-        if config["optimizer"] == "rmsprop":
-            from torch.optim import RMSprop
-            self.optimizer = RMSprop(
-                params=self.params,
-                lr=config["alpha"])
+    def communication_round(self, obs, pre_hat_obs, params=None):
+        self.comm_round += 1
 
-        elif config["optimizer"] == "adam":
-            from torch.optim import Adam
-            self.optimizer = Adam(
-                params=self.params,
-                lr=config["alpha"])
-        else:
-            raise ValueError("Unknown optimizer: {}".format(config["optimizer"]))
+        states = self.state_formulation(obs, pre_hat_obs, params)
 
-    def _add_criterion(self):
-        if self.config["loss_func"] == "mse":
-            self.criterion = nn.MSELoss()
-        else:
-            raise ValueError("Unknown loss function: {}".format(self.config["loss_func"]))
+        actions = self.choose_actions(states)
+
+        rewards = self.compute_reward(actions)
+
+        self.extract_message(obs, pre_hat_obs, params)
+        self.expand_obs(obs)
+
+        self.train()
+
+        self.memory.add(states, actions, rewards, None)
 
     def state_formulation(self, pos, obs, pre_hat_obs, params=None):
         obs = np.array(obs, dtype=np.float32).view((self.n_agent, -1))
@@ -110,6 +113,9 @@ class CommAgent(object):
             state = np.hstack((state, onehot[sender])) if self.config.get("share", False) else state
             states = np.vstack((states, state)) if states is not None else state
 
+        self._receive_permission(dist, queue_delay)
+        self._compute_overhead(dist, queue_delay)
+
         return states
 
     def _measure_dist(self, pos):
@@ -121,6 +127,7 @@ class CommAgent(object):
         return dist
 
     def _estimate_queue_delay(self):
+        # dim=0 (行）receiver, 每一行代表msg到达的次序，不能重复
         q_d = None
         for sender in range(self.n_agent):
             arrive_seq = np.arange(self.n_agent)
@@ -133,7 +140,7 @@ class CommAgent(object):
                 q_d = arrive_seq
         return q_d
 
-    def _evaluate_AoI(self, dist, queue, comm_round=0):
+    def __generate_AoI_template(self):
         AoI_template = np.zeros((self.n_agent, self.n_agent))
         for sender in range(self.n_agent):
             for receiver in range(sender, self.n_agent):
@@ -142,6 +149,11 @@ class CommAgent(object):
                 else:
                     AoI_template[sender][receiver] = max(sender, receiver)
                 AoI_template[receiver][sender] = AoI_template[sender][receiver]
+        return AoI_template
+
+    def _evaluate_AoI(self, dist, queue, comm_round=0):
+        # dim=0 行 是sender
+        AoI_template = self._AoI_template
 
         current_AoI = np.zeros((self.n_agent, self.n_agent))
         dist_grade = np.arange(self.sigma, step=self.sigma / self.n_agent)
@@ -168,26 +180,53 @@ class CommAgent(object):
                 actions.append(torch.argmax(q_values[0], dim=0).item())
             else:
                 actions.append(random.choice(range(self.action_space)))
+        self.modes = actions
         return actions
 
-    def extract_message(self, actions, obs, pre_hat_obs, params=None):
+    def extract_message(self, obs, pre_hat_obs, params=None):
+        actions = self.modes
         msgs = []
         for sender in range(self.n_agent):
             action, ob, pre_ob = actions[sender], obs[sender], pre_hat_obs[sender]
             param = params[sender] if params is not None else None
-            msg = [piece for i, piece in enumerate(zip(ob, pre_ob, param)) if i <= action]
+            msg = [piece for i, piece in enumerate((None, ob, pre_ob, param)) if i <= action]
             msgs.append(msg)
+        self.msgs = msgs
+
+    def _receive_permission(self, dist, queue_delay):
+        # 利用排队和距离来确定消息能不能发到接受者一方
+        # dim=0 行 recevier
+        self.receive = np.ones((self.n_agent, self.n_agent))
+        for receiver in range(self.n_agent):
+            for sender in range(self.n_agent):
+                # failed when too far or end of queue
+                if dist[sender][receiver] > self.config["comm_range"] or \
+                        queue_delay[receiver][sender] == self.n_agent - 1:
+                    self.receive[receiver][sender] = 0
+
+        # 对角线清零
+        diagonal = np.diagonal(self.receive)
+        diagonal[:] = 0
+        np.fill_diagonal(self.receive, diagonal)
+
+    def expand_obs(self, obs):
+        for receiver in range(self.n_agent):
+            e_ob = obs[receiver].copy()
+            for sender in range(self.n_agent):
+                if self.receive[receiver][sender]:
+                    e_ob = np.concatenate((e_ob, self.msgs[sender]), axis=0)
+            self.obs = np.vstack((self.obs, e_ob)) if self.obs is not None else e_ob
 
     def compute_reward(self, modes):
-        # encourage to communicate, modes that transmit more infos score higher
-        # use AoI to give negative feedback
+        # encourage to communicate, modes that transmit more infos score higher,AoI to give negative feedback
         o1 = 1
         o2 = 0.5
         o3 = 0.8
         AoI = np.mean(self.AoI_history, axis=1)
-        self.rewards = o1 * self.rewards + o2 * modes - o3 * AoI
+        rewards = o1 * self.rewards + o2 * modes - o3 * AoI
+        return rewards
 
-    def _compute_overhead(self, queue_delay, dist):
+    def _compute_overhead(self, dist, queue_delay):
         for sender in range(self.n_agent):
             d, q = dist[sender], queue_delay[:, sender]
             # 将排队的次序作为权重，主要还是以距离作为衡量通信的开销
@@ -221,6 +260,28 @@ class CommAgent(object):
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+
+    def _add_optim(self):
+        config = self.config
+        if config["optimizer"] == "rmsprop":
+            from torch.optim import RMSprop
+            self.optimizer = RMSprop(
+                params=self.params,
+                lr=config["alpha"])
+
+        elif config["optimizer"] == "adam":
+            from torch.optim import Adam
+            self.optimizer = Adam(
+                params=self.params,
+                lr=config["alpha"])
+        else:
+            raise ValueError("Unknown optimizer: {}".format(config["optimizer"]))
+
+    def _add_criterion(self):
+        if self.config["loss_func"] == "mse":
+            self.criterion = nn.MSELoss()
+        else:
+            raise ValueError("Unknown loss function: {}".format(self.config["loss_func"]))
 
 
 if __name__ == '__main__':

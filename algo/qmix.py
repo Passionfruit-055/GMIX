@@ -8,6 +8,8 @@ from model.mlp_nonnegative import MLP
 from model.sum_mixer import VDNMixer as GMixer
 from marl.ReplayBuffer import MAReplayBuffer
 
+from .comm import CommAgent
+
 import logging
 
 import torch
@@ -26,6 +28,8 @@ class QMIXAgent(object):
         self.target_mixer = None
 
         self.guide = None
+
+        self.comm_net = None
 
         self.device = (torch.device("cuda")
                        if torch.cuda.is_available() else torch.device("cpu"))
@@ -77,6 +81,9 @@ class QMIXAgent(object):
             self.params.extend(self.guide.parameters())
             self.gmixer = GMixer().to(self.device)
             self.params.extend(self.gmixer.parameters())
+
+        if self.config.get("comm", False):
+            self.comm_net = CommAgent(self.config)
 
         self.buffer = MAReplayBuffer(n_agent, self.config.get('batch_size', 128))
 

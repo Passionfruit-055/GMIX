@@ -8,7 +8,7 @@ from model.mlp_nonnegative import MLP
 from model.sum_mixer import VDNMixer as GMixer
 from marl.ReplayBuffer import MAReplayBuffer
 
-from .comm import CommAgent
+from algo.comm import CommAgent
 
 import logging
 
@@ -57,7 +57,8 @@ class QMIXAgent(object):
     def _build_model(self):
         n_agent = self.config["agent_num"]
 
-        obs_space = self.obs_space = self.config["obs_space"] + n_agent if self.config.get("share", False) else self.config["obs_space"]
+        obs_space = self.obs_space = self.config["obs_space"] + n_agent if self.config.get("share", False) else \
+        self.config["obs_space"]
         action_space = self.action_space = self.config["action_space"]
         state_space = self.state_space = self.config["state_space"]
 
@@ -82,9 +83,6 @@ class QMIXAgent(object):
             self.gmixer = GMixer().to(self.device)
             self.params.extend(self.gmixer.parameters())
 
-        if self.config.get("comm", False):
-            self.comm_net = CommAgent(self.config)
-
         self.buffer = MAReplayBuffer(n_agent, self.config.get('batch_size', 128))
 
     def train(self):
@@ -92,7 +90,6 @@ class QMIXAgent(object):
         batch_size = min(self.config.get('batch_size', 32), self.buffer.len)
         # sample batch
         obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs, mask = self.buffer.sample_batch(batch_size,
-
                                                                                                           self.device)
         rewards = torch.sum(rewards, dim=1)  # 各智能体 reward 累加得到 global rewards
 
@@ -153,7 +150,9 @@ class QMIXAgent(object):
 
     def compute_actions(self, obs):
         assert self.hidden_state is not None, "Hidden state hasn't been reset!"
-        obs = torch.tensor(obs, dtype=torch.float64).view(self.n_agent, -1).to(self.device)
+        obs = torch.tensor(obs, dtype=torch.float32).view(self.n_agent, -1).to(self.device)
+        onehot = torch.from_numpy(np.eye(self.n_agent)).to(self.device)
+        obs = torch.cat([obs, onehot], dim=-1)
 
         actions = []
         for a in range(self.n_agent):
@@ -229,12 +228,15 @@ class QMIXAgent(object):
         self.buffer.add(obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs)
 
 
-
-
 if __name__ == "__main__":
-    model = RNN(21, 5, 64)
-    hidden_state = torch.zeros((2, 5, 64)).to('cuda:0')
-    obs = torch.rand((5, 2, 5, 21)).to('cuda:0')
-    for i in range(5):
-        q, hidden_state = model(obs[i], hidden_state)
-        print(q.shape)
+    # model = RNN(21, 5, 64)
+    # hidden_state = torch.zeros((2, 5, 64)).to('cuda:0')
+    # obs = torch.rand((5, 2, 5, 21)).to('cuda:0')
+    # for i in range(5):
+    #     q, hidden_state = model(obs[i], hidden_state)
+    #     print(q.shape)
+
+    obs = torch.rand((2, 21))
+    onehot = torch.from_numpy(np.eye(2))
+    new_obs = torch.cat([obs, onehot], dim=-1)
+    print(new_obs.shape)

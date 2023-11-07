@@ -66,7 +66,7 @@ class CommAgent(object):
         self.action_space = action_space = self.config["action_space"] if self.config.get("share_param", False) else \
             self.config["action_space"] + 1
         self.state_space = state_space = self.config["state_space"]
-        assert state_space == (self.config['obs_space'] * 2 + 3), "wrong state space"
+        assert state_space == (self.config['obs_space'] * 2 + 4), "wrong state space"
 
         hidden_l1_dim = self.config["hidden_l1_dim"]
         hidden_l2_dim = self.config["hidden_l2_dim"]
@@ -99,6 +99,9 @@ class CommAgent(object):
 
         e_obs = self.expand_obs(obs, self.prepare_message(obs, params))
 
+        e_obs_size = e_obs.size / self.n_agent
+        self.config.update({"obs_space": e_obs_size})
+
         self.obs = obs
 
         # 不涉及时序，每一个timestep都可以做更新
@@ -122,12 +125,13 @@ class CommAgent(object):
         for sender in range(self.n_agent):
             ob, pre_ob = obs[sender], self.obs[sender]
             param = params[sender] if params is not None else None
-            d_i, q_i, Ao_i = dist[sender], queue_delay[:, sender], AoI[:, sender]
+            d_i, q_i, Ao_i, c_i = dist[sender], queue_delay[:, sender], AoI[:, sender], self.overhead[sender]
 
             # msg = np.concatenate((ob, pre_ob, param), axis=0)
             msg_pool = np.concatenate((ob, pre_ob), axis=0)
-            state = np.concatenate((np.max(d_i), np.max(q_i), np.max(Ao_i), msg_pool))
+            state = np.concatenate((np.max(d_i), np.max(q_i), np.max(Ao_i), c_i, msg_pool))
             state = np.hstack((state, onehot[sender])) if self.config.get("share", False) else state
+
             states = np.vstack((states, state)) if states is not None else state
 
         self._receive_permission(dist, queue_delay)
@@ -189,7 +193,8 @@ class CommAgent(object):
         states = torch.tensor(states, dtype=torch.float32).to(self.device)
 
         for a in range(self.n_agent):
-            q_values = self.model(states[a])
+            with torch.no_grad():
+                q_values = self.model(states[a])
             if random.random() > self.epsilon:
                 self.modes[a] = torch.argmax(q_values[0], dim=0).item()
             else:

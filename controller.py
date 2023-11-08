@@ -1,28 +1,27 @@
 import traceback
+import logging
 
 import yaml
-import marl
-from marl import logger, make_env, build_model
+from marl import make_env, match_agent
 from marl.mylogger import custom_logger
 
 # load config from yaml file
 config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
-exp_config, model_config, env_config = config.values()
-custom_logger(exp_config['logger'])
-
+custom_logger(config['experiment']['logger'])
+logger = logging.getLogger()
 
 try:
     # make env
-    env, env_config = make_env(env_config)
-    model_config.update(env_config)
-    # make model
-    model, model_config = build_model(model_config)
+    env = make_env(config['env'])
+    # init agent
+    CommAgent, GMIXAgent = match_agent(config)
 
 except Exception as e:
     logger.error(e)
     tb = e.__traceback__
     traceback.print_tb(tb)
 
+episode = config.get('episode', 1000)
+timestep = config.get('timestep', 100)
 
-
-
+# results =

@@ -41,7 +41,7 @@ class CommAgent(object):
         self.epsilon = config.get("epsilon", 0.2)
         self.sigma = config.get("sigma", 3)
 
-        buffer_size = self.max_episode = config.get("max_episode", 1000)  # 记录的是一个episode的数据，要够长
+        buffer_size = self.max_episode = config.get("max_timestep", 1000)  # 记录的是一个episode的数据，要够长
 
         self.comm_round = 0
 
@@ -61,12 +61,13 @@ class CommAgent(object):
         # expanded obs, pass to GMIX
         self.obs = np.zeros((self.n_agent, self.config["obs_space"]))
 
+        self.config.update({"obs_space": self.config["obs_space"] * self.n_agent})
+
     def _build_model(self):
 
         self.action_space = action_space = self.config["action_space"] if self.config.get("share_param", False) else \
             self.config["action_space"] + 1
-        self.state_space = state_space = self.config["state_space"]
-        assert state_space == (self.config['obs_space'] * 2 + 4), "wrong state space"
+        self.state_space = state_space = self.config['obs_space'] * 2 + 4
 
         hidden_l1_dim = self.config["hidden_l1_dim"]
         hidden_l2_dim = self.config["hidden_l2_dim"]
@@ -75,7 +76,7 @@ class CommAgent(object):
 
         self.model = MLP(state_space, action_space, hidden_l1_dim, hidden_l2_dim).to(self.device)
         self.target_model = MLP(state_space, action_space, hidden_l1_dim, hidden_l2_dim).to(self.device)
-        self.target_model.load_state_dict(self.model.state_dict()).to(self.device)
+        self.target_model.load_state_dict(self.model.state_dict())
         self.params.extend(list(self.model.parameters()))
 
     def communication_round(self, obs, params=None, done=False):
@@ -302,7 +303,7 @@ class CommAgent(object):
             raise ValueError("Unknown optimizer: {}".format(config["optimizer"]))
 
     def _add_criterion(self):
-        if self.config["loss_func"] == "mse":
+        if self.config["loss"] == "mse":
             self.criterion = nn.MSELoss()
         else:
             raise ValueError("Unknown loss function: {}".format(self.config["loss_func"]))

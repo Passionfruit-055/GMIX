@@ -3,15 +3,17 @@ from logging.config import fileConfig
 from os import path, makedirs
 
 from datetime import datetime
-
 now = datetime.now()
 
-log_file_path = path.join(path.dirname(path.abspath(__file__)), 'logging_config.ini')
-fileConfig(log_file_path)
-logger = logging.getLogger()
+
+def init_logger():
+    log_file_path = path.join(path.dirname(path.abspath(__file__)), 'logging_config.ini')
+    fileConfig(log_file_path)
+    return logging.getLogger()
 
 
 def custom_logger(config):
+    logger = logging.getLogger()
     log_level = config.get('log_level', 'DEBUG')
     whether_custom_log_path = config.get('custom_file_handler_path', False)
     log_path = './results/' + now.strftime("%m.%d") + '/' if not whether_custom_log_path \

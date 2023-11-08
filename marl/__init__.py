@@ -1,7 +1,11 @@
 import warnings
 
-from .mylogger import logger
+from .mylogger import init_logger
 from algo.qmix import QMIXAgent
+from algo.comm import CommAgent
+from env import config_env
+
+logger = init_logger()
 
 
 def get_config(config, key, default, warning=None):
@@ -22,10 +26,12 @@ def make_env(config):
     map_name = config.get('map_name', None)
     logger.info(f"Map: {map_name}")
 
+    special_config = config_env(mode='preset', env=env_name, map=map_name)
+
     if env_name == 'mpe':
         if map_name.find('reference') != -1:
             from pettingzoo.mpe import simple_reference_v3
-            env = simple_reference_v3.env(render_mode="human")
+            env = simple_reference_v3.env(**special_config)
             seed = get_config(config, 'seed', 21, "undefined seed")
             env.reset(seed=seed)
         else:
@@ -46,10 +52,15 @@ def make_env(config):
 
     else:
         raise NotImplementedError(f"Undefined env <{env_name}>")
+    return env
 
-    return env, config
+
+def match_agent(config):
+    config['model'].update(config['env'])
+    comm_agent = CommAgent(config['model']) if config['model']['comm'] else None
+    q_agent = QMIXAgent(config['model'])
+    return comm_agent, q_agent
 
 
-def build_model(config):
-    q_agent = QmixAgent(config)
-    return q_agent, config
+def run_one_scenario(config, env, comm_agent, q_agent):
+    pass

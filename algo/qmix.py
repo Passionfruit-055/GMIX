@@ -69,7 +69,7 @@ class QMIXAgent(object):
 
         self.model = RNN(obs_space, action_space, hidden_l1_dim).to(self.device)
         self.target_model = RNN(obs_space, action_space, hidden_l1_dim).to(self.device)
-        self.target_model.load_state_dict(self.model.state_dict()).to(self.device)
+        self.target_model.load_state_dict(self.model.state_dict())
         self.params.extend(self.model.parameters())
 
         self.mixer = QMixer(n_agent, hidden_l1_dim, state_space).to(self.device)
@@ -213,7 +213,7 @@ class QMIXAgent(object):
             raise ValueError("Unknown optimizer: {}".format(config["optimizer"]))
 
     def _add_criterion(self):
-        if self.config["loss_func"] == "mse":
+        if self.config["loss"] == "mse":
             self.criterion = nn.MSELoss()
         else:
             raise ValueError("Unknown loss function: {}".format(self.config["loss_func"]))

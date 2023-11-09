@@ -16,6 +16,8 @@ class CommAgent(object):
     def __init__(self, config):
         self.config = config
 
+        self.name = 'C-network'
+
         self.model = None
         self.target_model = None
 
@@ -31,7 +33,7 @@ class CommAgent(object):
 
         self.save_cycle = self.config.get("save_cycle", 0)
         self.target_model_update_cycle = self.config.get("target_model_update_cycle", 0)
-        self.current_step = 0
+        self.train_step = 0
 
         self.hidden_state = None
         self.target_hidden_state = None
@@ -41,7 +43,7 @@ class CommAgent(object):
         self.epsilon = config.get("epsilon", 0.2)
         self.sigma = config.get("sigma", 3)
 
-        buffer_size = self.max_episode = config.get("max_timestep", 1000)  # 记录的是一个episode的数据，要够长
+        buffer_size = self.max_episode_len = config.get("timestep", 1000)  # 记录的是一个episode的数据，要够长
 
         self.comm_round = 0
 
@@ -64,10 +66,11 @@ class CommAgent(object):
         self.config.update({"obs_space": self.config["obs_space"] * self.n_agent})
 
     def _build_model(self):
-
-        self.action_space = action_space = self.config["action_space"] if self.config.get("share_param", False) else \
+        share_param = self.config.get("share_param", False)
+        share = self.config.get("share", False)
+        self.action_space = action_space = self.config["action_space"] if not share_param else \
             self.config["action_space"] + 1
-        self.state_space = state_space = self.config['obs_space'] * 2 + 4
+        self.state_space = state_space = self.config['obs_space'] * 2 + 4 + self.n_agent if share else 0
 
         hidden_l1_dim = self.config["hidden_l1_dim"]
         hidden_l2_dim = self.config["hidden_l2_dim"]
@@ -79,19 +82,21 @@ class CommAgent(object):
         self.target_model.load_state_dict(self.model.state_dict())
         self.params.extend(list(self.model.parameters()))
 
-    def communication_round(self, obs, params=None, done=False):
+    def communication_round(self, obs, pos, params=None, done=False):
         # add here to provide a protection
         if done:
             logger = logging.getLogger()
             logger.error("last timestep, should not be stored!")
             return
 
+        pos = self._extract_agent_pos(obs)
+
         self.comm_round += 1
-        states = self.state_formulation(obs, params)
+        states = self.state_formulation(pos, obs, params)
         # do not save first and last
-        assert self.states is not None, "Ignore first timestep!"
         # 在这一时刻将上一个时刻的历史存入，当前时刻状态充当下一时刻状态
-        self.memory.add(self.states, self.modes, self.rewards, states)
+        if self.states is not None:
+            self.memory.add(self.states, self.modes, self.rewards, states)
         self.states = states
 
         self.choose_actions(states)
@@ -111,9 +116,9 @@ class CommAgent(object):
         return e_obs, self.modes
 
     def state_formulation(self, pos, obs, params=None):
-        obs = np.array(obs, dtype=np.float32).view((self.n_agent, -1))
-        self.obs = np.array(self.obs, dtype=np.float32).view((self.n_agent, -1))
-        params = np.array(params, dtype=np.float32).view((self.n_agent, -1)) if params is not None else None
+        obs = np.array(obs, dtype=np.float32).reshape((self.n_agent, -1))
+        self.obs = np.array(self.obs, dtype=np.float32).reshape((self.n_agent, -1))
+        params = np.array(params, dtype=np.float32).reshape((self.n_agent, -1)) if params is not None else None
 
         dist = self._measure_dist(pos)
         queue_delay = self._estimate_queue_delay()
@@ -128,9 +133,8 @@ class CommAgent(object):
             param = params[sender] if params is not None else None
             d_i, q_i, Ao_i, c_i = dist[sender], queue_delay[:, sender], AoI[:, sender], self.overhead[sender]
 
-            # msg = np.concatenate((ob, pre_ob, param), axis=0)
             msg_pool = np.concatenate((ob, pre_ob), axis=0)
-            state = np.concatenate((np.max(d_i), np.max(q_i), np.max(Ao_i), c_i, msg_pool))
+            state = np.concatenate((np.array([np.max(d_i), np.max(q_i), np.max(Ao_i), c_i]), msg_pool), axis=0)
             state = np.hstack((state, onehot[sender])) if self.config.get("share", False) else state
 
             states = np.vstack((states, state)) if states is not None else state
@@ -139,6 +143,15 @@ class CommAgent(object):
         self._compute_overhead(dist, queue_delay)
 
         return states
+
+    def _extract_agent_pos(self, obs):
+        scenario = self.config.get('scenario', 'mpe_reference')
+        if scenario == 'mpe_reference':
+            pos = obs[:, :2]
+        else:
+            raise NotImplementedError('Undefined pos extraction from observation')
+
+        return pos
 
     def _measure_dist(self, pos):
         dist = np.zeros((self.n_agent, self.n_agent))
@@ -180,13 +193,13 @@ class CommAgent(object):
             for receiver in range(self.n_agent):
                 dist_index = np.where(dist_grade >= dist[sender][receiver])[0]
                 if dist_index.size == 0:
-                    current_AoI = AoI_template[self.n_agent - 1][self.n_agent - 1]
+                    current_AoI[sender][receiver] = AoI_template[self.n_agent - 1][self.n_agent - 1]
                 else:
                     q_index = queue[sender][receiver]
-                    current_AoI = AoI_template[dist_index[0]][q_index]
+                    current_AoI[sender][receiver] = AoI_template[dist_index[0]][q_index]
 
         self.AoI_history = current_AoI if comm_round == 0 else self.AoI_history + current_AoI
-        AoI = self.AoI_history / comm_round
+        AoI = self.AoI_history / comm_round if comm_round != 0 else current_AoI
 
         return AoI
 
@@ -201,6 +214,8 @@ class CommAgent(object):
             else:
                 self.modes[a] = random.randint(0, self.action_space - 1)
 
+        self.modes = np.array(self.modes, dtype=np.int32)
+
     def prepare_message(self, obs, params=None):
         actions = self.modes
         assert params is None, "to be developed!"
@@ -212,7 +227,7 @@ class CommAgent(object):
             msg_kinds = (blank_msg, pre_ob, ob, (ob, param))
             msg = msg_kinds[action]
             msgs.append(msg)
-        msgs = np.array(msgs, dtype=np.float32).view((self.n_agent, -1))
+        msgs = np.array(msgs, dtype=np.float32).reshape((self.n_agent, -1))
         return msgs
 
     def _receive_permission(self, dist, queue_delay):
@@ -222,14 +237,12 @@ class CommAgent(object):
         for receiver in range(self.n_agent):
             for sender in range(self.n_agent):
                 # failed when too far or end of queue
-                if dist[sender][receiver] > self.config["comm_range"] or \
+                if dist[sender][receiver] > self.sigma or \
                         queue_delay[receiver][sender] == self.n_agent - 1:
                     self.receive[receiver][sender] = 0
 
         # 对角线清零
-        diagonal = np.diagonal(self.receive)
-        diagonal[:] = 0
-        np.fill_diagonal(self.receive, diagonal)
+        self.receive[np.eye(self.n_agent, dtype=np.bool)] = 0
 
     def expand_obs(self, obs, msgs):
         e_obs = None
@@ -260,11 +273,12 @@ class CommAgent(object):
 
     def _update_target_model(self):
         assert self.target_model_update_cycle != 0, "target_model_update_cycle must be set!"
-        if self.current_step % self.config["target_model_update_cycle"] == 0:
+        if self.train_step % self.config["target_model_update_cycle"] == 0:
             self.target_model.load_state_dict(self.model.state_dict())
 
     def train(self):
-        batch_size = min(self.config.get("batch_size", 32), self.comm_round)
+        self.train_step += 1
+        batch_size = min(self.config.get("batch_size", 32), self.comm_round - 1)
         minibatch = self.memory.sample_batch(batch_size)
         for batch in minibatch:
             states, actions, rewards, n_states = batch
@@ -307,6 +321,27 @@ class CommAgent(object):
             self.criterion = nn.MSELoss()
         else:
             raise ValueError("Unknown loss function: {}".format(self.config["loss_func"]))
+
+    def load_model(self, scenario):
+        logger = logging.getLogger()
+        logger.info(f"Load model from scenario {scenario}")
+        scenario = './chkpt/' + scenario
+        self.model.load_state_dict(torch.load(scenario + '_' + self.name + '.pth'))
+        self.target_model.load_state_dict(torch.load(scenario + '_' + self.name + '_target.pth'))
+
+    def save_model(self):
+        assert self.save_cycle != 0, "save_cycle must be set!"
+        if self.train_step % self.config["save_cycle"] == 0:
+            from datetime import datetime
+            now = datetime.now()
+            timestamp = now.strftime("%Y_%m_%d_%H_%M_")
+            timepath = now.strftime("%m.%d")
+            scenario = self.config.get('scenario', None)
+            assert scenario is not None, "Undefined scenario!"
+            torch.save(self.model.state_dict(),
+                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}.pth")
+            torch.save(self.target_model.state_dict(),
+                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_target.pth")
 
 
 if __name__ == '__main__':

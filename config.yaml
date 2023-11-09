@@ -5,8 +5,8 @@ experiment:
     file_handler_path: ''
   running:
     seed: 0
-    max_episode: 1000
-    max_timestep: 100
+    episode: 1000
+    timestep: 100
     buffer_size: 128
     batch_size: 32
 
@@ -17,7 +17,7 @@ model:
   hidden_l2_dim: 128
   optimizer: 'rmsprop' #adam
   loss: 'mse'
-  save_cycle: 800
+  save_cycle: 500
   target_model_update_cycle: 500
   algo: 'qmix' # 'vdn', 'iql'
   alpha: 0.001 # lr for optimizer

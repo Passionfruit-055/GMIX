@@ -8,18 +8,18 @@ from model.mlp_nonnegative import MLP
 from model.sum_mixer import VDNMixer as GMixer
 from marl.ReplayBuffer import MAReplayBuffer
 
-from algo.comm import CommAgent
 
 import logging
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class QMIXAgent(object):
     def __init__(self, config):
         self.config = config
+
+        self.name = self.config.get("algo", "QMIX")
 
         self.model = None
         self.target_model = None
@@ -41,9 +41,10 @@ class QMIXAgent(object):
 
         self._add_criterion()
 
+        self.train_step = 0
         self.save_cycle = self.config.get("save_cycle", 0)
         self.target_model_update_cycle = self.config.get("target_model_update_cycle", 0)
-        self.current_step = 0
+
 
         self.hidden_state = None
         self.target_hidden_state = None
@@ -58,7 +59,7 @@ class QMIXAgent(object):
         n_agent = self.config["agent_num"]
 
         obs_space = self.obs_space = self.config["obs_space"] + n_agent if self.config.get("share", False) else \
-        self.config["obs_space"]
+            self.config["obs_space"]
         action_space = self.action_space = self.config["action_space"]
         state_space = self.state_space = self.config["state_space"]
 
@@ -86,7 +87,6 @@ class QMIXAgent(object):
         self.buffer = MAReplayBuffer(n_agent, self.config.get('batch_size', 128))
 
     def train(self):
-        self.current_step += 1
         batch_size = min(self.config.get('batch_size', 32), self.buffer.len)
         # sample batch
         obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs, mask = self.buffer.sample_batch(batch_size,
@@ -141,10 +141,11 @@ class QMIXAgent(object):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.params, max_norm=10, norm_type=2)
             self.optimizer.step()
+            self.train_step += 1
 
     def update_target_model(self):
         assert self.target_model_update_cycle != 0, "target_model_update_cycle must be set!"
-        if self.current_step % self.config["target_model_update_cycle"] == 0:
+        if self.train_step % self.config["target_model_update_cycle"] == 0:
             self.target_model.load_state_dict(self.model.state_dict())
             self.target_mixer.load_state_dict(self.mixer.state_dict())
 
@@ -168,26 +169,28 @@ class QMIXAgent(object):
         logger = logging.getLogger()
         logger.info(f"Load model from scenario {scenario}")
         scenario = './chkpt/' + scenario
-        self.model.load_state_dict(torch.load(scenario + '_model.pth'))
-        self.target_model.load_state_dict(torch.load(scenario + '_target_model.pth'))
-        self.mixer.load_state_dict(torch.load(scenario + '_mixer.pth'))
-        self.target_mixer.load_state_dict(torch.load(scenario + '_target_mixer.pth'))
+        self.model.load_state_dict(torch.load(scenario + '_' + self.name + '_model.pth'))
+        self.target_model.load_state_dict(torch.load(scenario + '_' + self.name + '_target_model.pth'))
+        self.mixer.load_state_dict(torch.load(scenario + '_' + self.name + '_mixer.pth'))
+        self.target_mixer.load_state_dict(torch.load(scenario + '_' + self.name + '_target_mixer.pth'))
 
     def save_model(self):
         assert self.save_cycle != 0, "save_cycle must be set!"
-        if self.current_step % self.config["save_cycle"] == 0:
+        if self.train_step % self.config["save_cycle"] == 0:
             from datetime import datetime
             now = datetime.now()
             timestamp = now.strftime("%Y_%m_%d_%H_%M_")
             timepath = now.strftime("%m.%d")
             scenario = self.config.get('scenario', None)
             assert scenario is not None, "Undefined scenario!"
-            torch.save(self.model.state_dict(), f"./chkpt/{timepath}/{timestamp + self.config['scenario']}_model.pth")
+            torch.save(self.model.state_dict(),
+                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_model.pth")
             torch.save(self.target_model.state_dict(),
-                       f"./chkpt/{timepath}/{timestamp + self.config['scenario']}_target_model.pth")
-            torch.save(self.mixer.state_dict(), f"./chkpt/{timepath}/{timestamp + self.config['scenario']}_mixer.pth")
+                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_target_model.pth")
+            torch.save(self.mixer.state_dict(),
+                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_mixer.pth")
             torch.save(self.target_mixer.state_dict(),
-                       f"./chkpt/{timepath}/{timestamp + self.config['scenario']}_target_mixer.pth")
+                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_target_mixer.pth")
 
     def _reset_hidden_state(self, batch_size=1):
         # hidden state 是网络需要的，和输入的维度关系不大

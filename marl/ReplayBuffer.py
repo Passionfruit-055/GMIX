@@ -13,8 +13,8 @@ class MAReplayBuffer(object):
         self.buffer = deque(maxlen=buffer_size)
         self.len = len(self.buffer)
 
-    def add(self, obs, actions, rewards, n_obs, dones, states=None, n_states=None, mus=None, msgs=None):
-        experience = (obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs)  # (agent_num, T, 8)
+    def add(self, obs, actions, rewards, n_obs, dones, states=None, n_states=None, mus=None):
+        experience = (obs, actions, rewards, n_obs, dones, states, n_states, mus)  # (agent_num, T, 8)
         self.buffer.append(experience)
         self.len = len(self.buffer)
 
@@ -50,7 +50,7 @@ class ReplayBuffer(object):
         self.len = len(self.buffer)
 
     def add(self, states, actions, rewards, n_states):
-        experience = [states, actions, n_states, rewards]
+        experience = [states, actions, rewards, n_states]
         self.buffer.append(experience)
         self.len = len(self.buffer)
 

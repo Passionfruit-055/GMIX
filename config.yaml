@@ -40,3 +40,9 @@ env:
   seed: 0
   communicate: True
   msg_len: 10
+
+plot:
+  cmap: 'Set2'
+  fontsize: 15
+  font_family: 'Times New Roman'
+  theme: 'seaborn'

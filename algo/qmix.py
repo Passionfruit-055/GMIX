@@ -8,7 +8,6 @@ from model.mlp_nonnegative import MLP
 from model.sum_mixer import VDNMixer as GMixer
 from marl.ReplayBuffer import MAReplayBuffer
 
-
 import logging
 
 import torch
@@ -44,7 +43,6 @@ class QMIXAgent(object):
         self.train_step = 0
         self.save_cycle = self.config.get("save_cycle", 0)
         self.target_model_update_cycle = self.config.get("target_model_update_cycle", 0)
-
 
         self.hidden_state = None
         self.target_hidden_state = None
@@ -89,8 +87,8 @@ class QMIXAgent(object):
     def train(self):
         batch_size = min(self.config.get('batch_size', 32), self.buffer.len)
         # sample batch
-        obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs, mask = self.buffer.sample_batch(batch_size,
-                                                                                                          self.device)
+        obs, actions, rewards, n_obs, dones, states, n_states, mus, mask = self.buffer.sample_batch(batch_size,
+                                                                                                    self.device)
         rewards = torch.sum(rewards, dim=1)  # 各智能体 reward 累加得到 global rewards
 
         T = obs.shape[0]
@@ -98,7 +96,7 @@ class QMIXAgent(object):
         assert batch_size == B, "batch_size not match!"
         N = n_agent = obs.shape[1]
         assert n_agent == self.config["agent_num"] and n_agent == self.buffer.agent_num, "agent_num not match!"
-        self._reset_hidden_state(batch_size)
+        self.reset_hidden_state(batch_size)
 
         for t in range(T):
             eval_action_qs = []
@@ -149,21 +147,79 @@ class QMIXAgent(object):
             self.target_model.load_state_dict(self.model.state_dict())
             self.target_mixer.load_state_dict(self.mixer.state_dict())
 
-    def compute_actions(self, obs):
+    def choose_actions(self, obs):
         assert self.hidden_state is not None, "Hidden state hasn't been reset!"
         obs = torch.tensor(obs, dtype=torch.float32).view(self.n_agent, -1).to(self.device)
-        onehot = torch.from_numpy(np.eye(self.n_agent)).to(self.device)
+        onehot = torch.from_numpy(np.eye(self.n_agent, dtype=np.float32)).to(self.device)
         obs = torch.cat([obs, onehot], dim=-1)
+
+        pre_actions, Qvals = self._compute_Q_vals(obs)
+
+        warning_signals = self._generate_warning_signals(obs.cpu().detach().numpy())
+
+        obs = torch.cat([obs, torch.tensor(warning_signals, dtype=torch.float32).to(self.device)], dim=-1)
+
+        Gvals = self._compute_G_vals(obs)
+
+        fixed_Qvals = self._modify_Q_vals(Qvals, Gvals)
 
         actions = []
         for a in range(self.n_agent):
-            with torch.no_grad():
-                Qvals, self.hidden_state[a] = self.model(obs[a], self.hidden_state[a])
             if random.random() > self.epsilon:
-                actions.append(torch.argmax(Qvals[0], dim=0).item())
+                actions.append(torch.argmax(fixed_Qvals[a], dim=0).item())
             else:
                 actions.append(random.choice(range(self.action_space)))
-        return actions
+
+        return actions, warning_signals
+
+    def _compute_Q_vals(self, obs):
+        pre_actions, Qvals = [], []
+        for a in range(self.n_agent):
+            with torch.no_grad():
+                Qval, self.hidden_state[a] = self.model(obs[a], self.hidden_state[a])
+            if random.random() > self.epsilon:
+                pre_actions.append(torch.argmax(Qval[0], dim=0).item())
+            else:
+                pre_actions.append(random.choice(range(self.action_space)))
+            Qvals.append(Qval.cpu().detach().numpy())
+        return pre_actions, Qvals
+
+    def _compute_G_vals(self, obs):
+        Gvals = []
+        for a in range(self.n_agent):
+            with torch.no_grad():
+                Gval = self.guide(obs[a])
+            Gvals.append(Gval.cpu().detach().numpy())
+        return Gvals
+
+    def _modify_Q_vals(self, Qvals, Gvals):
+        Qvals, Gvals = np.array(Qvals).reshape(self.n_agent, -1), np.array(Gvals).reshape(self.n_agent, -1)
+        fixed_Q_vals = Qvals - self.phi * Gvals
+        return torch.from_numpy(fixed_Q_vals)
+
+    def _generate_warning_signals(self, obs):
+        # warning signal include external knowledge, should customize for different scenarios
+        scenario = self.config.get('scenario', None)
+        assert scenario is not None, "Undefined scenario!"
+        warning_signals = np.zeros((self.n_agent, 1))
+        if scenario == 'mpe_reference':
+            # reference环境的风险来自于当前agent与其他agent的距离，与自己目标的距离
+            # map是一个2x2的地图，定义agent之间的安全距离为1，定义agent与landmark的安全距离为1
+            a2a_safe_dist = 1
+            a2l_safe_dist = 1
+            pos = obs[:, 0:2]
+            dist = obs[:, 2:8].reshape(self.n_agent, -1, 2)
+            for a1 in range(self.n_agent):
+                # 智能体间，要保持安全距离，防止碰撞
+                for a2 in range(a1 + 1, self.n_agent):
+                    if np.linalg.norm(pos[a1] - pos[a2]) < a2a_safe_dist:
+                        warning_signals[a1] += 1
+                        warning_signals[a2] += 1
+                # 智能体与地标间，不能超出安全距离，这里可以假设成BS和node
+                for d in dist[a1]:
+                    if np.linalg.norm(d) > a2l_safe_dist:
+                        warning_signals[a1] += 1
+        return warning_signals
 
     def load_model(self, scenario):
         logger = logging.getLogger()
@@ -192,10 +248,10 @@ class QMIXAgent(object):
             torch.save(self.target_mixer.state_dict(),
                        f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_target_mixer.pth")
 
-    def _reset_hidden_state(self, batch_size=1):
+    def reset_hidden_state(self, batch_size=1):
         # hidden state 是网络需要的，和输入的维度关系不大
         agent_num = self.config.get('agent_num')
-        hidden_layer_size = self.model.hidden_state_size
+        hidden_layer_size = self.model.rnn_hidden_size
         self.hidden_state = torch.zeros((agent_num, batch_size, hidden_layer_size)).to(self.device)
         self.target_hidden_state = torch.zeros((agent_num, batch_size, hidden_layer_size)).to(self.device)
 
@@ -221,14 +277,14 @@ class QMIXAgent(object):
         else:
             raise ValueError("Unknown loss function: {}".format(self.config["loss_func"]))
 
-    def store_experience(self, obs, actions, rewards, n_obs, dones, states=None, n_states=None, mus=None, msgs=None):
+    def store_experience(self, obs, actions, rewards, n_obs, dones, states=None, n_states=None, mus=None):
         # 默认传进来的都是list, 在这里转变为ndarray, 并对state在N维度上做扩展（复制）, 并执行类型转换
-        experience = [obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs]
-        experience = [
-            np.array(e, dtype=np.float32) if e is not None else None
-            for e in experience]
-        obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs = experience
-        self.buffer.add(obs, actions, rewards, n_obs, dones, states, n_states, mus, msgs)
+        # experience = [obs, actions, rewards, n_obs, dones, states, n_states, mus]
+        # experience = [np.array(e, dtype=np.float32) if e is not None else None
+        #               for e in experience]
+        # obs, actions, rewards, n_obs, dones, states, n_states, mus = experience
+        # 传入的已经是ndarray
+        self.buffer.add(obs, actions, rewards, n_obs, dones, states, n_states, mus)
 
 
 if __name__ == "__main__":

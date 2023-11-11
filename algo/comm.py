@@ -63,13 +63,12 @@ class CommAgent(object):
         # expanded obs, pass to GMIX
         self.obs = np.zeros((self.n_agent, self.config["obs_space"]))
 
-        self.config.update({"obs_space": self.config["obs_space"] * self.n_agent})
+        self.config.update({"obs_space": self.config["obs_space"] * self.n_agent + 1})  # e_obs + mode
 
     def _build_model(self):
         share_param = self.config.get("share_param", False)
         share = self.config.get("share", False)
-        self.action_space = action_space = self.config["action_space"] if not share_param else \
-            self.config["action_space"] + 1
+        self.action_space = action_space = 3 if not share_param else 4
         self.state_space = state_space = self.config['obs_space'] * 2 + 4 + self.n_agent if share else 0
 
         hidden_l1_dim = self.config["hidden_l1_dim"]
@@ -103,17 +102,14 @@ class CommAgent(object):
 
         self.compute_reward()
 
-        e_obs = self.expand_obs(obs, self.prepare_message(obs, params))
-
-        e_obs_size = e_obs.size / self.n_agent
-        self.config.update({"obs_space": e_obs_size})
+        e_obs = self.expand_obs(obs, self._prepare_message(obs, params))
 
         self.obs = obs
 
         # 不涉及时序，每一个timestep都可以做更新
         self.train()
 
-        return e_obs, self.modes
+        return np.concatenate((e_obs, self.modes.reshape((self.n_agent, 1))), axis=1)
 
     def state_formulation(self, pos, obs, params=None):
         obs = np.array(obs, dtype=np.float32).reshape((self.n_agent, -1))
@@ -216,8 +212,8 @@ class CommAgent(object):
 
         self.modes = np.array(self.modes, dtype=np.int32)
 
-    def prepare_message(self, obs, params=None):
-        actions = self.modes
+    def _prepare_message(self, obs, params=None):
+        actions = self.modes.tolist()
         assert params is None, "to be developed!"
         msgs = []
         for sender in range(self.n_agent):
@@ -246,11 +242,15 @@ class CommAgent(object):
 
     def expand_obs(self, obs, msgs):
         e_obs = None
+        blank_msg = np.zeros(obs[0].shape)
         for receiver in range(self.n_agent):
             e_ob = obs[receiver].copy()
             for sender in range(self.n_agent):
-                if self.receive[receiver][sender]:
-                    e_ob = np.concatenate((e_ob, msgs[sender]), axis=0)
+                if receiver != sender:
+                    if self.receive[receiver][sender]:
+                        e_ob = np.concatenate((e_ob, msgs[sender]), axis=0)
+                    else:
+                        e_ob = np.concatenate((e_ob, blank_msg), axis=0)
             e_obs = np.vstack((e_obs, e_ob)) if e_obs is not None else e_ob
         # 保证每个agent的obs维度一致
         return e_obs

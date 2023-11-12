@@ -63,7 +63,9 @@ class CommAgent(object):
         # expanded obs, pass to GMIX
         self.obs = np.zeros((self.n_agent, self.config["obs_space"]))
 
-        self.config.update({"obs_space": self.config["obs_space"] * self.n_agent + 1})  # e_obs + mode
+        # obs_to_policy_agent: e_obs + mode + onehot
+        self.config.update({"obs_space": self.config["obs_space"] * self.n_agent + 1 + self.n_agent})
+        self.config.update({"state_space": self.config["obs_space"] * self.n_agent})
 
     def _build_model(self):
         share_param = self.config.get("share_param", False)
@@ -109,7 +111,7 @@ class CommAgent(object):
         # 不涉及时序，每一个timestep都可以做更新
         self.train()
 
-        return np.concatenate((e_obs, self.modes.reshape((self.n_agent, 1))), axis=1)
+        return np.concatenate((e_obs, self.modes.reshape((self.n_agent, 1)), np.eye(self.n_agent)), axis=1)
 
     def state_formulation(self, pos, obs, params=None):
         obs = np.array(obs, dtype=np.float32).reshape((self.n_agent, -1))

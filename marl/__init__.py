@@ -19,7 +19,8 @@ rootpath = './results/' + today + '/'
 if not os.path.exists(rootpath):
     os.makedirs(rootpath)
 folder = ['/' + f + '/' for f in ['data', 'fig', 'video']]
-running_mode = 'debug'
+
+save_this_batch = True
 
 
 def count_folders(path):
@@ -36,8 +37,9 @@ def basic_preparation(config, info):
         batch_count = count_folders(rootpath)
         return '/' + str(batch_count) + '_' + env.upper() + mapn + '_' + info + '/'
 
-    global running_mode
     running_mode = config['experiment']['running']['mode']
+
+    global save_this_batch
     save_this_batch = False if info.find('test') != -1 or running_mode == 'debug' else True
 
     batch_name = '' if not save_this_batch else _name_batch()
@@ -50,6 +52,7 @@ def basic_preparation(config, info):
     logger = init_logger(config['experiment']['logger'],
                          log_path=rootpath + batch_name if save_this_batch else rootpath)
     logger.info(f"\nRun it for: {info}")
+    logger.info(f"This batch is {'' if save_this_batch else 'NOT'} recorded!")
     # set seed
     set_seed(config['experiment']['running'].get('seed', 21))
     seed = random.randint(0, 1000)
@@ -135,7 +138,6 @@ def run_one_scenario(config, seed, env, comm_agent, agent):
     agent.reset_hidden_state()
     # raw_env 是 parallel_env 的一个属性
     while env.agents:
-        # this is where you would insert your policy
         done = True if True in dones else False
         observations = np.array(list(observations.values()), dtype=np.float32)
 
@@ -151,6 +153,7 @@ def run_one_scenario(config, seed, env, comm_agent, agent):
         results.append([e_obs, actions, rewards, warning_signals, dones])
 
     env.close()
+
     return results  # return a whole episode
 
 
@@ -171,7 +174,7 @@ def store_results(episode, batch_name, agent, results):
 
     # to ndarray (T, N, size)
     obs = np.array(obs).reshape(seq_len, n_agent, -1)
-    actions = np.array(actions).reshape(seq_len, n_agent, -1)
+    actions = np.array(actions, dtype=np.int64).reshape(seq_len, n_agent, -1)
     rewards = np.array(rewards).reshape(seq_len, n_agent, -1)
     mus = np.array(mus).reshape(seq_len, n_agent, -1)
     dones = np.array(dones).reshape(seq_len, n_agent, -1)
@@ -191,7 +194,7 @@ def store_results(episode, batch_name, agent, results):
 
     agent.store_experience(obs, actions, rewards, n_obs, dones, states, n_states, mus)
 
-    def save_to_mat():
+    def _save_to_mat():
         filenames = ['rewards.mat', 'actions.mat', 'mus.mat', 'dones.mat']
         for filename, category in zip(filenames, [rewards, actions, mus, dones]):
             if not os.path.exists(rootpath + batch_name + folder[0] + filename):
@@ -201,7 +204,8 @@ def store_results(episode, batch_name, agent, results):
                 history.update({f'episode{episode}': category})
                 sio.savemat(rootpath + batch_name + folder[0] + filename, history)
 
-    save_to_mat()
+    if save_this_batch:
+        _save_to_mat()
 
     return obs, actions, rewards, n_obs, dones, states, n_states, mus
 
@@ -230,15 +234,20 @@ def plot_results(episode, batch_name, results, config):
 
     def _rewards():
         fig, axes = plt.subplots(1, n_agent + 1, figsize=((n_agent + 1) * 6 + 2, 6))
-        xlabels = [f'Agent{i + 1}' for i in range(n_agent)] + ['Global']
-        for ax, xlabel, reward, color in zip(axes, xlabels, (rewards[0], rewards[1], global_reward), colors):
-            ax.plot(reward, color=color, label=xlabel)
+        labels = [f'Agent{i + 1}' for i in range(n_agent)] + ['Global']
+        for ax, label, reward, color in zip(axes, labels, (rewards[0], rewards[1], global_reward), colors):
+            ax.plot(reward, color=color, label=label)
             ax.set_xlabel('Timestep')
-        plt.legend()
-        plt.title('Reward')
+            ax.set_ylabel('Reward')
+            ax.legend()
+        fig.suptitle('Episode ' + str(episode + 1))
         plt.tight_layout()
-        plt.savefig(rootpath + batch_name + folder[1] + 'rewards.png')
-        plt.savefig(rootpath + batch_name + folder[1] + 'rewards.pdf')
+        if save_this_batch:
+            plt.savefig(rootpath + batch_name + folder[1] + 'rewards.png')
+            plt.savefig(rootpath + batch_name + folder[1] + 'rewards.pdf')
+        else:
+            pass
+            # plt.show()
         plt.close()
 
     def _reward_in_one():
@@ -247,9 +256,16 @@ def plot_results(episode, batch_name, results, config):
         for label, reward, color in zip(labels, (rewards[0], rewards[1], global_reward), colors):
             plt.plot(reward, color=color, label=label)
         plt.legend()
+        plt.xlabel('Timestep')
+        plt.ylabel('Reward')
+        plt.title('Episode ' + str(episode + 1))
         plt.tight_layout()
-        plt.savefig(rootpath + batch_name + folder[1] + 'rewards_in_one.png')
-        plt.savefig(rootpath + batch_name + folder[1] + 'rewards_in_one.pdf')
+        if save_this_batch:
+            plt.savefig(rootpath + batch_name + folder[1] + 'rewards_in_one.png')
+            plt.savefig(rootpath + batch_name + folder[1] + 'rewards_in_one.pdf')
+        else:
+            pass
+            # plt.show()
         plt.close()
 
     _rewards()
@@ -257,4 +273,6 @@ def plot_results(episode, batch_name, results, config):
 
 
 def train_agent(config, comm_agent, agent):
+    # comm_agent 每一个communication round都会进行train, 这里仅考虑GMIX的train过程
+    agent.train()
     pass

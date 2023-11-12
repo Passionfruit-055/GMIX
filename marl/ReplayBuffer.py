@@ -18,24 +18,20 @@ class MAReplayBuffer(object):
         self.buffer.append(experience)
         self.len = len(self.buffer)
 
-    def sample_batch(self, batch_size, dev):
-        # 最后以不同量的形式返回，形状为 (B, N, T, size) N = agent_num, size 是这个量的维度
+    def sample(self, batch_size, dev):
         assert batch_size <= self.len, "batch_size should be less than buffer size"
+
         indices = np.random.choice(self.len, batch_size, replace=False)
-        T = max(len(self.buffer[index][0][0]) for index in indices)
 
         minibatch = [[] for _ in range(len(self.buffer[0]))]
-        mask = []
         for index in indices:
-            episode = self.buffer[index]
+            episode = self.buffer[index]  # (T, N ,size)
             for d, mb in zip(episode, minibatch):
-                d = torch.tensor(d).transpose(0, 1).to(dev) if d is not None else d
-                mb.append(d)
-            mask.append(torch.ones(minibatch[0][-1].shape[0:2]).unsqueeze(2))
+                mb.append(torch.tensor(d).to(dev) if d is not None else d)
 
-        minibatch.append(mask)
+        minibatch = [pad_sequence(mb, padding_value=0, batch_first=False) for mb in minibatch]
 
-        minibatch = [pad_sequence(mb, padding_value=0).transpose(1, 2) if mb[0] is not None else mb for mb in minibatch]
+        minibatch = [mb.transpose(1, 2) if mb[0] is not None and len(mb[0].shape) > 2 else mb for mb in minibatch]
 
         return minibatch  # (T, N, B, size)
 
@@ -64,21 +60,3 @@ class ReplayBuffer(object):
         self.len = len(self.buffer)
 
 
-if __name__ == '__main__':
-    obs = np.zeros((2, 30, 21))
-    short_obs = np.zeros((2, 10, 21))
-    actions = np.zeros((2, 30, 1))
-    rewards = np.zeros((2, 30, 1))
-    n_obs = np.zeros((2, 30, 21))
-    dones = np.zeros((2, 30, 2))
-    states = np.zeros((2, 30, 21))
-    n_states = np.zeros((2, 30, 21))
-    warnings = np.zeros((2, 30, 1))
-    mus = np.zeros((2, 30, 1))
-    msgs = None
-
-    buffer = MAReplayBuffer(2)
-    for i in range(10):
-        buffer.add(random.choice([obs, short_obs]), actions, rewards, n_obs, dones, states, n_states, mus, msgs)
-    minibatch = buffer.sample_batch(5, 'cuda:0')
-    print(minibatch)

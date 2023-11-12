@@ -9,6 +9,7 @@ experiment:
     timestep: 100
     buffer_size: 128
     batch_size: 32
+    mode: 'exp' # ['exp', 'tune', 'debug']
 
 model:
   input_dim: None

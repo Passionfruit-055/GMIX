@@ -16,16 +16,16 @@ now = datetime.now()
 today = now.strftime("%m.%d")
 current_time = now.strftime("%H_%M")
 rootpath = './results/' + today + '/'
+if not os.path.exists(rootpath):
+    os.makedirs(rootpath)
 folder = ['/' + f + '/' for f in ['data', 'fig', 'video']]
+running_mode = 'debug'
 
 
 def count_folders(path):
     folder_count = 0
-    # for _, dirs, _ in os.walk(path[:-1]):
-    #     folder_count += len(dirs)
-    for fn in os.listdir(path[:-1]):  # fn 表示的是文件名
+    for _ in os.listdir(path[:-1]):
         folder_count += 1
-
     return folder_count
 
 
@@ -34,12 +34,22 @@ def basic_preparation(config, info):
         env = config['env']['env_name']
         mapn = config['env']['map_name']
         batch_count = count_folders(rootpath)
-        return '/' + str(batch_count) + '_' + env.upper() + mapn + '__' + info + '/'
+        return '/' + str(batch_count) + '_' + env.upper() + mapn + '_' + info + '/'
 
-    batch_name = _name_batch()
+    global running_mode
+    running_mode = config['experiment']['running']['mode']
+    save_this_batch = False if info.find('test') != -1 or running_mode == 'debug' else True
+
+    batch_name = '' if not save_this_batch else _name_batch()
+    if save_this_batch:
+        # create result folder for this batch
+        for f in folder:
+            if not os.path.exists(rootpath + batch_name + f):
+                os.makedirs(rootpath + batch_name + f)
     # prepare logger
-    logger = init_logger(config['experiment']['logger'], log_path=rootpath + batch_name)
-    logger.info(f"Run it for: {info}")
+    logger = init_logger(config['experiment']['logger'],
+                         log_path=rootpath + batch_name if save_this_batch else rootpath)
+    logger.info(f"\nRun it for: {info}")
     # set seed
     set_seed(config['experiment']['running'].get('seed', 21))
     seed = random.randint(0, 1000)
@@ -48,10 +58,6 @@ def basic_preparation(config, info):
     episode = config['experiment']['running'].get('episode', 1000)
     seq_len = config['experiment']['running'].get('timestep', 100)
 
-    # create result folder
-    for f in folder:
-        if not os.path.exists(rootpath + batch_name + f):
-            os.makedirs(rootpath + batch_name + f)
     return logger, batch_name, seed, episode, seq_len
 
 
@@ -200,14 +206,14 @@ def store_results(episode, batch_name, agent, results):
     return obs, actions, rewards, n_obs, dones, states, n_states, mus
 
 
-def plot_results(episode, results, config):
+def plot_results(episode, batch_name, results, config):
     # process data
     obs, actions, rewards, n_obs, dones, states, n_states, mus = results
     n_agent = rewards.shape[1]
 
     def _global_reward():
         all_rewards = np.sum(rewards.squeeze(), axis=1)
-        return all_rewards / len(n_agent)
+        return all_rewards / n_agent
 
     rewards = rewards.reshape(n_agent, -1)
     global_reward = _global_reward()
@@ -231,8 +237,8 @@ def plot_results(episode, results, config):
         plt.legend()
         plt.title('Reward')
         plt.tight_layout()
-        plt.savefig(rootpath + folder[1] + 'rewards.png')
-        plt.savefig(rootpath + folder[1] + 'rewards.pdf')
+        plt.savefig(rootpath + batch_name + folder[1] + 'rewards.png')
+        plt.savefig(rootpath + batch_name + folder[1] + 'rewards.pdf')
         plt.close()
 
     def _reward_in_one():
@@ -242,8 +248,8 @@ def plot_results(episode, results, config):
             plt.plot(reward, color=color, label=label)
         plt.legend()
         plt.tight_layout()
-        plt.savefig(rootpath + folder[1] + 'rewards_in_one.png')
-        plt.savefig(rootpath + folder[1] + 'rewards_in_one.pdf')
+        plt.savefig(rootpath + batch_name + folder[1] + 'rewards_in_one.png')
+        plt.savefig(rootpath + batch_name + folder[1] + 'rewards_in_one.pdf')
         plt.close()
 
     _rewards()

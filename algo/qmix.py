@@ -102,7 +102,7 @@ class QMIXAgent(object):
         rewards = _global_rewards()
 
         def _generate_mask():
-            dones = dones.reshape(T, B, N)
+            mask = dones.reshape(T, B, N)
 
             return mask
 

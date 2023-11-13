@@ -10,7 +10,7 @@ os.environ['NUMEXPR_MAX_THREADS'] = '12'
 config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 # TODO add parser
 
-info = 'NoERROR running'
+info = 'testLossDown'
 logger, batch_name, seed, episode, seq_len = basic_preparation(config, info)
 
 if __name__ == '__main__':

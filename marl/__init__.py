@@ -8,7 +8,7 @@ import scipy.io as sio
 import matplotlib.pyplot as plt
 
 from .mylogger import init_logger
-from algo.qmix import QMIXAgent
+from algo.qmix import QMIXAgent, losses
 from algo.comm import CommAgent
 from env import config_env
 
@@ -21,6 +21,9 @@ if not os.path.exists(rootpath):
 folder = ['/' + f + '/' for f in ['data', 'fig', 'video']]
 
 save_this_batch = True
+
+tot_episode = 0
+seq_len = 0
 
 
 def count_folders(path):
@@ -58,10 +61,11 @@ def basic_preparation(config, info):
     seed = random.randint(0, 1000)
     logger.debug(f"seed: {seed}")
 
-    episode = config['experiment']['running'].get('episode', 1000)
+    global tot_episode, seq_len
+    tot_episode = config['experiment']['running'].get('episode', 1000)
     seq_len = config['experiment']['running'].get('timestep', 100)
 
-    return logger, batch_name, seed, episode, seq_len
+    return logger, batch_name, seed, tot_episode, seq_len
 
 
 def get_config(config, key, default, warning=None):
@@ -93,7 +97,7 @@ def make_env(config):
     map_name = config.get('map_name', None)
     logger.info(f"MAP: {map_name}")
 
-    env_config = config_env(mode=config.get('mode', 'preset'), env=env_name, map=map_name)
+    env_config = config_env(mode=config.get('param', 'preset'), env=env_name, map=map_name)
 
     if env_name == 'mpe':
         if map_name.find('reference') != -1:
@@ -211,12 +215,23 @@ def store_results(episode, batch_name, agent, results):
 
 
 def plot_results(episode, batch_name, results, config):
-    # process data
     obs, actions, rewards, n_obs, dones, states, n_states, mus = results
     n_agent = rewards.shape[1]
 
+    def _save_mode():
+        keep_live = config.get('keep_live', True)
+        if keep_live:
+            live_path = rootpath + batch_name + folder[1] + '/live/'
+            if not os.path.exists(live_path):
+                os.mkdir(live_path)
+        save_recent_n_episode = config.get('save_recent_n_episode', 32)
+        return keep_live, save_recent_n_episode
+
+    if save_this_batch:
+        live, recent_num = _save_mode()
+
     def _global_reward():
-        all_rewards = np.sum(rewards.squeeze(), axis=1)
+        all_rewards = np.sum(rewards.squeeze(), axis=0)
         return all_rewards / n_agent
 
     rewards = rewards.reshape(n_agent, -1)
@@ -226,7 +241,7 @@ def plot_results(episode, batch_name, results, config):
         plt.style.use(config.get('theme', 'seaborn'))
         plt.rcParams['font.family'] = config.get('font_family', 'Times New Roman')
         plt.rcParams['font.size'] = config.get('fontsize', 15)
-        cmap = plt.cm.get_cmap(config.get('cmap', 'Set2'))
+        cmap = plt.colormaps.get_cmap(config.get('cmap', 'Set2'))
         color = cmap.colors
         return color
 
@@ -240,11 +255,11 @@ def plot_results(episode, batch_name, results, config):
             ax.set_xlabel('Timestep')
             ax.set_ylabel('Reward')
             ax.legend()
-        fig.suptitle('Episode ' + str(episode + 1))
+        fig.suptitle('Episode ' + str(episode))
         plt.tight_layout()
         if save_this_batch:
-            plt.savefig(rootpath + batch_name + folder[1] + 'rewards.png')
-            plt.savefig(rootpath + batch_name + folder[1] + 'rewards.pdf')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/live/{episode % recent_num}_rewards.png')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/live/{episode % recent_num}_rewards.pdf')
         else:
             pass
             # plt.show()
@@ -258,22 +273,39 @@ def plot_results(episode, batch_name, results, config):
         plt.legend()
         plt.xlabel('Timestep')
         plt.ylabel('Reward')
-        plt.title('Episode ' + str(episode + 1))
+        plt.title('Episode ' + str(episode))
         plt.tight_layout()
         if save_this_batch:
-            plt.savefig(rootpath + batch_name + folder[1] + 'rewards_in_one.png')
-            plt.savefig(rootpath + batch_name + folder[1] + 'rewards_in_one.pdf')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/live/{episode % recent_num}_rewards_in_one.png')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/live/{episode % recent_num}_rewards_in_one.pdf')
         else:
             pass
             # plt.show()
         plt.close()
 
+    def _losses():
+        plt.figure()
+        plt.xlabel('Timestep')
+        plt.ylabel('Losses')
+        plt.title('Until episode ' + str(episode))
+        plt.plot(losses, color=random.choice(colors))
+        if save_this_batch:
+            plt.savefig(rootpath + batch_name + folder[1] + f'/losses.png')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/losses.pdf')
+        else:
+            pass
+            if episode % (tot_episode // 10) == 0:
+                plt.show()
+        plt.close()
+
     _rewards()
     _reward_in_one()
+    _losses()
 
 
 def train_agent(config, comm_agent, agent):
     # comm_agent 每一个communication round都会进行train, 这里仅考虑GMIX的train过程
     autograd_detect = not save_this_batch
     agent.train(autograd_detect)
-    pass
+
+

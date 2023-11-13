@@ -1,6 +1,10 @@
 import random
-
 import numpy as np
+import logging
+from collections import deque
+
+import torch
+import torch.nn as nn
 
 from model.rnn import RNN
 from model.monotonic_mixer import QMixer
@@ -8,10 +12,7 @@ from model.mlp_nonnegative import MLP
 from model.sum_mixer import VDNMixer as GMixer
 from marl.ReplayBuffer import MAReplayBuffer
 
-import logging
-
-import torch
-import torch.nn as nn
+losses = deque(maxlen=int(1e4))
 
 
 class QMIXAgent(object):
@@ -165,6 +166,8 @@ class QMIXAgent(object):
             self.optimizer.zero_grad()
             with torch.autograd.set_detect_anomaly(autograd_detect):
                 loss.backward()
+            global losses
+            losses.append(loss.detach().item())
             torch.nn.utils.clip_grad_norm_(self.params, max_norm=10, norm_type=2)
             self.optimizer.step()
             self.train_step += 1
@@ -285,10 +288,6 @@ class QMIXAgent(object):
                 torch.zeros((agent_num, batch_size, hidden_layer_size), requires_grad=False).to(self.device))
             self.target_hidden_state.append(
                 torch.zeros((agent_num, batch_size, hidden_layer_size), requires_grad=False).to(self.device))
-        # self.hidden_state = torch.zeros((seq_len + 1, agent_num, batch_size, hidden_layer_size),
-        #                                 requires_grad=False).to(self.device)
-        # self.target_hidden_state = torch.zeros((seq_len + 1, agent_num, batch_size, hidden_layer_size),
-        #                                        requires_grad=False).to(self.device)
 
     def _add_optim(self):
         config = self.config

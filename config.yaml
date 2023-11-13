@@ -9,7 +9,7 @@ experiment:
     timestep: 100
     buffer_size: 128
     batch_size: 32
-    mode: 'exp' # ['exp', 'tune', 'debug']
+    mode: 'debug' # ['exp', 'tune', 'debug']
 
 model:
   input_dim: None
@@ -35,7 +35,7 @@ model:
 
 
 env:
-  mode: 'preset' # 'test', 'finetuned'
+  param: 'preset' # 'test', 'finetuned'
   env_name: 'mpe' # 'smac'
   map_name: 'reference'
   seed: 0
@@ -47,3 +47,5 @@ plot:
   fontsize: 15
   font_family: 'Times New Roman'
   theme: 'seaborn'
+  save_recent_n_episode: 10
+  keep_live: True

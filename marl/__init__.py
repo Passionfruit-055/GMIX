@@ -135,7 +135,7 @@ def run_one_scenario(config, seed, env, comm_agent, agent):
     observations, infos = env.reset(seed)
     n_agent = len(env.agents)
     dones = [False for _ in range(n_agent)]
-    agent.reset_hidden_state()
+    agent.reset_hidden_state(seq_len=1)
     # raw_env 是 parallel_env 的一个属性
     while env.agents:
         done = True if True in dones else False
@@ -274,5 +274,6 @@ def plot_results(episode, batch_name, results, config):
 
 def train_agent(config, comm_agent, agent):
     # comm_agent 每一个communication round都会进行train, 这里仅考虑GMIX的train过程
-    agent.train()
+    autograd_detect = not save_this_batch
+    agent.train(autograd_detect)
     pass

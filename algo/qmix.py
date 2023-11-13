@@ -84,7 +84,7 @@ class QMIXAgent(object):
 
         self.buffer = MAReplayBuffer(n_agent, self.config.get('buffer_size', 128))
 
-    def train(self):
+    def train(self, autograd_detect=False):
         batch_size = min(self.config.get('batch_size', 32), self.buffer.len)
 
         obs, actions, rewards, n_obs, dones, states, n_states, mus = self.buffer.sample(batch_size, self.device)
@@ -97,18 +97,23 @@ class QMIXAgent(object):
         assert batch_size == B, "batch_size not match!"
 
         def _global_rewards():
-            return torch.sum(rewards, dim=1)  # 各智能体 reward 累加得到 global rewards
+            return torch.sum(rewards, dim=1).to(torch.float32)  # 各智能体 reward 累加得到 global rewards
 
         rewards = _global_rewards()
 
         def _generate_mask():
-            mask = dones.reshape(T, B, N)
-
-            return mask
+            mask_raw = dones.reshape(T, B, N)
+            mask = np.ones((T, B, 1), dtype=np.float32)
+            for t in range(T):
+                for b in range(B):
+                    for n in range(N):
+                        mask[t, b, 0] = mask_raw[t, b, n] or False
+                    mask[t, b, 0] = 1 if not mask[t, b, 0] else 0
+            return torch.from_numpy(mask).reshape(T, B, 1).to(self.device).to(torch.float32)
 
         mask = _generate_mask()
 
-        self.reset_hidden_state(batch_size)
+        self.reset_hidden_state(B, T)
 
         for t in range(T):
             eval_action_qs = []
@@ -116,8 +121,10 @@ class QMIXAgent(object):
             g_values = []
 
             for n in range(N):
-                eval_qs, self.hidden_state[n] = self.model(obs[t, n], self.hidden_state[n])
-                target_qs, self.target_hidden_state[n] = self.target_model(obs[t, n], self.target_hidden_state[n])
+                with torch.autograd.set_detect_anomaly(autograd_detect):
+                    eval_qs, self.hidden_state[t + 1][n] = self.model(obs[t, n], self.hidden_state[t][n])
+                    target_qs, self.target_hidden_state[t + 1][n] = self.target_model(obs[t, n],
+                                                                                      self.target_hidden_state[t][n])
 
                 eval_q = torch.gather(eval_qs, 1, actions[t, n]).squeeze(-1)
                 target_q = torch.max(target_qs, 1)[0]
@@ -134,22 +141,30 @@ class QMIXAgent(object):
             distributed_target_qs = torch.vstack(target_action_qs).view(B, N)
             distributed_gs = torch.vstack(g_values).view(B, N) if len(g_values) > 0 else None
 
-            tot_q = self.mixer(distributed_qs, states[t].to(torch.float32))
-            target_tot_q = self.target_mixer(distributed_target_qs, n_states[t].to(torch.float32))
+            tot_q = self.mixer(distributed_qs, states[t].to(torch.float32)).view(B, 1)
+            target_tot_q = self.target_mixer(distributed_target_qs, n_states[t].to(torch.float32)).view(B, 1)
 
-            td_target = rewards[t] + self.gamma * torch.mul(target_tot_q.detach(), mask[t, 0].detach())
+            td_target = rewards[t] + self.gamma * torch.mul(target_tot_q.detach(), mask[t].detach())
 
             loss = self.criterion(tot_q, td_target)
 
             if distributed_gs is not None:
-                bar_mu = torch.mean(mus[t], dim=0).view(B, 1)
-                tot_g = self.gmixer(distributed_gs, dim=1).detach().cpu()
+                bar_mu = torch.mean(mus[t].to(torch.float32), dim=0).view(B, 1)
+                tot_g = self.gmixer(distributed_gs, dim=1).detach()
                 target_g = bar_mu + self.beta * torch.mean(distributed_gs)
                 gloss = self.criterion(tot_g, target_g)
                 loss += gloss
 
+            def _hidden_state_detach():
+                for t in range(T):
+                    self.hidden_state[t] = self.hidden_state[t].detach()
+                    self.target_hidden_state[t] = self.target_hidden_state[t].detach()
+
+            _hidden_state_detach()
+
             self.optimizer.zero_grad()
-            loss.backward()
+            with torch.autograd.set_detect_anomaly(autograd_detect):
+                loss.backward()
             torch.nn.utils.clip_grad_norm_(self.params, max_norm=10, norm_type=2)
             self.optimizer.step()
             self.train_step += 1
@@ -187,7 +202,7 @@ class QMIXAgent(object):
         pre_actions, Qvals = [], []
         for a in range(self.n_agent):
             with torch.no_grad():
-                Qval, self.hidden_state[a] = self.model(obs[a], self.hidden_state[a])
+                Qval, self.hidden_state[0][a] = self.model(obs[a], self.hidden_state[0][a])
             if random.random() > self.epsilon:
                 pre_actions.append(torch.argmax(Qval[0], dim=0).item())
             else:
@@ -259,12 +274,21 @@ class QMIXAgent(object):
             torch.save(self.target_mixer.state_dict(),
                        f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_target_mixer.pth")
 
-    def reset_hidden_state(self, batch_size=1):
+    def reset_hidden_state(self, batch_size=1, seq_len=100):
         # hidden state 是网络需要的，和输入的维度关系不大
         agent_num = self.config.get('agent_num')
         hidden_layer_size = self.model.rnn_hidden_size
-        self.hidden_state = torch.zeros((agent_num, batch_size, hidden_layer_size)).to(self.device)
-        self.target_hidden_state = torch.zeros((agent_num, batch_size, hidden_layer_size)).to(self.device)
+        self.hidden_state = []
+        self.target_hidden_state = []
+        for t in range(seq_len + 1):
+            self.hidden_state.append(
+                torch.zeros((agent_num, batch_size, hidden_layer_size), requires_grad=False).to(self.device))
+            self.target_hidden_state.append(
+                torch.zeros((agent_num, batch_size, hidden_layer_size), requires_grad=False).to(self.device))
+        # self.hidden_state = torch.zeros((seq_len + 1, agent_num, batch_size, hidden_layer_size),
+        #                                 requires_grad=False).to(self.device)
+        # self.target_hidden_state = torch.zeros((seq_len + 1, agent_num, batch_size, hidden_layer_size),
+        #                                        requires_grad=False).to(self.device)
 
     def _add_optim(self):
         config = self.config

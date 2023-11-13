@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as f
+import torch.nn.functional as F
 
 
 class RNN(nn.Module):
@@ -17,9 +17,9 @@ class RNN(nn.Module):
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.to(self.device)
 
-    def forward(self, obs, hidden_state=None):
-        input = obs.view(-1, self.input_shape).to(torch.float32)
-        x = f.relu(self.fc1(input))
+    def forward(self, inputs, hidden_state=None):
+        inputs = inputs.view(-1, self.input_shape).to(torch.float32)
+        x = F.relu(self.fc1(inputs))
         h_in = hidden_state.reshape(-1, self.rnn_hidden_size)
         h = self.rnn(x, h_in)
         q = self.fc2(h)

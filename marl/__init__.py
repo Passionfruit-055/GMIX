@@ -25,6 +25,8 @@ save_this_batch = True
 tot_episode = 0
 seq_len = 0
 
+end_rewards = {}
+
 
 def count_folders(path):
     folder_count = 0
@@ -55,7 +57,7 @@ def basic_preparation(config, info):
     logger = init_logger(config['experiment']['logger'],
                          log_path=rootpath + batch_name if save_this_batch else rootpath)
     logger.info(f"\nRun it for: {info}")
-    logger.info(f"This batch is {'' if save_this_batch else 'NOT'} recorded!")
+    logger.info(f"This batch is{'' if save_this_batch else ' NOT'} recorded!")
     # set seed
     set_seed(config['experiment']['running'].get('seed', 21))
     seed = random.randint(0, 1000)
@@ -78,8 +80,6 @@ def get_config(config, key, default, warning=None):
 
 
 def set_seed(seed):
-    import random
-    import numpy as np
     import torch
     random.seed(seed)
     np.random.seed(seed)
@@ -129,12 +129,19 @@ def make_env(config):
 def match_agent(config):
     config['model'].update(config['env'])
     config['model'].update(config['experiment']['running'])
+    algo = config.get('model', {}).get('algo', 'qmix')
     comm_agent = CommAgent(config['model']) if config['model']['comm'] else None
-    q_agent = QMIXAgent(config['model'])
+    if algo == 'qmix':
+        q_agent = QMIXAgent(config['model'])
+    else:
+        raise NotImplementedError(f"Algorithm {algo} undefined!")
     return comm_agent, q_agent
 
 
 def run_one_scenario(config, seed, env, comm_agent, agent):
+    need_guide = config['model'].get('guide', True)
+    communicate = config['model'].get('comm', True)
+
     results = []
     observations, infos = env.reset(seed)
     n_agent = len(env.agents)
@@ -145,13 +152,13 @@ def run_one_scenario(config, seed, env, comm_agent, agent):
         done = True if True in dones else False
         observations = np.array(list(observations.values()), dtype=np.float32)
 
-        e_obs = comm_agent.communication_round(observations, done)
+        e_obs = comm_agent.communication_round(observations, done) if communicate else observations
 
         actions, warning_signals = agent.choose_actions(e_obs)
 
-        actions = {agent: action for agent, action in zip(env.agents, actions)}
+        observations, rewards, terminations, truncations, infos = env.step(
+            {agent: action for agent, action in zip(env.agents, actions)})  # 传进去的需要是一个字典
 
-        observations, rewards, terminations, truncations, infos = env.step(actions)
         dones = list(map(lambda x, y: x or y, terminations.values(), truncations.values()))
 
         results.append([e_obs, actions, rewards, warning_signals, dones])
@@ -216,7 +223,9 @@ def store_results(episode, batch_name, agent, results):
 
 def plot_results(episode, batch_name, results, config):
     obs, actions, rewards, n_obs, dones, states, n_states, mus = results
+
     n_agent = rewards.shape[1]
+    labels = [f'Agent{i + 1}' for i in range(n_agent)] + ['Global']
 
     def _save_mode():
         keep_live = config.get('keep_live', True)
@@ -236,6 +245,19 @@ def plot_results(episode, batch_name, results, config):
 
     rewards = rewards.reshape(n_agent, -1)
     global_reward = _global_reward()
+
+    def _extract_end_reward():
+        for i, r in enumerate(rewards):
+            if len(end_rewards) < i + 1:
+                end_rewards.update({f'Agent{i}': [r[-1]]})
+            else:
+                end_rewards[f'Agent{i}'].append(r[-1])
+        if len(end_rewards) < n_agent + 1:
+            end_rewards.update({'Global': [global_reward[-1]]})
+        else:
+            end_rewards['Global'].append(global_reward[-1])
+
+    _extract_end_reward()
 
     def _set_canvas():
         plt.style.use(config.get('theme', 'seaborn'))
@@ -267,7 +289,6 @@ def plot_results(episode, batch_name, results, config):
 
     def _reward_in_one():
         plt.figure()
-        labels = [f'Agent{i + 1}' for i in range(n_agent)] + ['Global']
         for label, reward, color in zip(labels, (rewards[0], rewards[1], global_reward), colors):
             plt.plot(reward, color=color, label=label)
         plt.legend()
@@ -298,8 +319,26 @@ def plot_results(episode, batch_name, results, config):
                 plt.show()
         plt.close()
 
+    def _end_reward():
+        plt.figure()
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        for end_r, label, color in zip(end_rewards.values(), labels, colors):
+            plt.plot(end_r, label=label, color=color)
+        plt.legend()
+        plt.tight_layout()
+        if save_this_batch:
+            plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeReward.png')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeReward.pdf')
+        else:
+            pass
+            if episode % (tot_episode // 10) == 0:
+                plt.show()
+        plt.close()
+
     _rewards()
     _reward_in_one()
+    _end_reward()
     _losses()
 
 
@@ -307,5 +346,3 @@ def train_agent(config, comm_agent, agent):
     # comm_agent 每一个communication round都会进行train, 这里仅考虑GMIX的train过程
     autograd_detect = not save_this_batch
     agent.train(autograd_detect)
-
-

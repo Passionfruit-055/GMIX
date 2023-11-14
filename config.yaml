@@ -5,11 +5,11 @@ experiment:
     file_handler_path: ''
   running:
     seed: 0
-    episode: 1000
+    episode: 10000
     timestep: 100
     buffer_size: 128
     batch_size: 32
-    mode: 'debug' # ['exp', 'tune', 'debug']
+    mode: 'exp' # ['exp', 'tune', 'debug']
 
 model:
   input_dim: None
@@ -20,7 +20,7 @@ model:
   loss: 'mse'
   save_cycle: 500
   target_model_update_cycle: 500
-  algo: 'qmix' # 'vdn', 'iql'
+  algo: 'qmix' # ['vdn', 'iql']
   alpha: 0.001 # lr for optimizer
   gamma: 0.8 # lr for future reward
   share: True # agent share one NN, switch to expand obs_space (add one hot(agent_num))

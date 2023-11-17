@@ -100,7 +100,7 @@ class CommAgent(object):
             self.memory.add(self.states, self.modes, self.rewards, states)
         self.states = states
 
-        self.choose_actions(states)
+        self.choose_comm_modes(states)
 
         self.compute_reward()
 
@@ -201,7 +201,7 @@ class CommAgent(object):
 
         return AoI
 
-    def choose_actions(self, states):
+    def choose_comm_modes(self, states):
         states = torch.tensor(states, dtype=torch.float32).to(self.device)
 
         for a in range(self.n_agent):

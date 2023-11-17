@@ -27,6 +27,7 @@ class QMIXAgent(object):
         self.mixer = None
         self.target_mixer = None
 
+        self.need_guide = self.config.get("guide", True)
         self.guide = None
 
         self.comm_net = None
@@ -77,7 +78,7 @@ class QMIXAgent(object):
         self.target_mixer.load_state_dict(self.mixer.state_dict())
         self.params.extend(self.mixer.parameters())
 
-        if self.config.get("guide", False):
+        if self.need_guide:
             self.guide = MLP(obs_space + 1, action_space, hidden_l1_dim).to(self.device)
             self.params.extend(self.guide.parameters())
             self.gmixer = GMixer().to(self.device)
@@ -184,18 +185,18 @@ class QMIXAgent(object):
 
         pre_actions, Qvals = self._compute_Q_vals(obs)
 
-        warning_signals = self._generate_warning_signals(obs.cpu().detach().numpy())
-
-        obs = torch.cat([obs, torch.tensor(warning_signals, dtype=torch.float32).to(self.device)], dim=-1)
-
-        Gvals = self._compute_G_vals(obs)
-
-        fixed_Qvals = self._modify_Q_vals(Qvals, Gvals)
+        if self.need_guide:
+            warning_signals = self._generate_warning_signals(obs.cpu().detach().numpy())
+            obs = torch.cat([obs, torch.tensor(warning_signals, dtype=torch.float32).to(self.device)], dim=-1)
+            Gvals = self._compute_G_vals(obs)
+            Qvals = self._modify_Q_vals(Qvals, Gvals)
+        else:
+            warning_signals = None
 
         actions = []
         for a in range(self.n_agent):
             if random.random() > self.epsilon:
-                actions.append(torch.argmax(fixed_Qvals[a], dim=0).item())
+                actions.append(torch.argmax(Qvals[a], dim=0).item())
             else:
                 actions.append(random.choice(range(self.action_space)))
 

@@ -25,49 +25,96 @@ save_this_batch = True
 tot_episode = 0
 seq_len = 0
 
-end_rewards = {}
+end_rewards = []
+
+batch_supervisor = iter([0])
+exp_name = ''
+
+logger = None
 
 
-def count_folders(path):
+def _count_folders(path):
     folder_count = 0
     for _ in os.listdir(path[:-1]):
         folder_count += 1
     return folder_count
 
 
-def basic_preparation(config, info):
-    def _name_batch():
-        env = config['env']['env_name']
-        mapn = config['env']['map_name']
-        batch_count = count_folders(rootpath)
-        return '/' + str(batch_count) + '_' + env.upper() + mapn + '_' + info + '/'
+def running_config(config, info):
+    batches = config.get('experiment', {}).get('running', {}).get('batches', [0])
+    batch_num = len(batches)
 
     running_mode = config['experiment']['running']['mode']
+
+    def _batch_generator(batches):
+        for batch in batches:
+            yield batch
+
+    global batch_supervisor
+    batch_supervisor = _batch_generator(batches)
+
+    def _name_batch():
+        env = config['env']['env_name']
+        Map = config['env']['map_name']
+        batch_count = _count_folders(rootpath)
+        return '/' + str(batch_count) + '_' + env.upper() + Map + '_' + info + '/'
+
+    global exp_name
+    exp_name = _name_batch()
 
     global save_this_batch
     save_this_batch = False if info.find('test') != -1 or running_mode == 'debug' else True
 
-    batch_name = '' if not save_this_batch else _name_batch()
-    if save_this_batch:
-        # create result folder for this batch
-        for f in folder:
-            if not os.path.exists(rootpath + batch_name + f):
-                os.makedirs(rootpath + batch_name + f)
     # prepare logger
+    global logger
     logger = init_logger(config['experiment']['logger'],
-                         log_path=rootpath + batch_name if save_this_batch else rootpath)
+                         log_path=rootpath + exp_name if save_this_batch else rootpath)
     logger.info(f"\nRun it for: {info}")
     logger.info(f"This batch is{'' if save_this_batch else ' NOT'} recorded!")
+
     # set seed
-    set_seed(config['experiment']['running'].get('seed', 21))
-    seed = random.randint(0, 1000)
+    seed = set_seed(config['experiment']['running'].get('seed', 21))
     logger.debug(f"seed: {seed}")
+
+    if save_this_batch:
+        # create result folder for this experiment
+        if not os.path.exists(rootpath + exp_name):
+            os.makedirs(rootpath + exp_name)
 
     global tot_episode, seq_len
     tot_episode = config['experiment']['running'].get('episode', 1000)
     seq_len = config['experiment']['running'].get('timestep', 100)
 
-    return logger, batch_name, seed, tot_episode, seq_len
+    global end_rewards
+    end_rewards = {str(batch): [] for batch in batches}
+
+    return batch_num, seed, tot_episode, seq_len, logger
+
+
+def one_batch_basic_preparation(config):
+    this_batch = next(batch_supervisor)
+
+    def _parse_this_batch():
+        if this_batch.find('mix') != -1:
+            config['model'].update({'guide': False, 'comm': False})
+            if this_batch.find('g') != -1:
+                config['model'].update({'guide': True})
+                logger.info(f"need guide")
+            if this_batch.find('c') != -1:
+                config['model'].update({'comm': True})
+                logger.info(f"need communication")
+
+    _parse_this_batch()
+
+    batch_name = '/' if not save_this_batch else exp_name + '/' + str(this_batch) + '/'
+
+    if save_this_batch:
+        # create result folder for this batch
+        for f in folder:
+            if not os.path.exists(rootpath + batch_name + f):
+                os.makedirs(rootpath + batch_name + f)
+
+    return batch_name
 
 
 def get_config(config, key, default, warning=None):
@@ -85,6 +132,7 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    return seed
 
 
 def make_env(config):
@@ -224,6 +272,10 @@ def store_results(episode, batch_name, agent, results):
 def plot_results(episode, batch_name, results, config):
     obs, actions, rewards, n_obs, dones, states, n_states, mus = results
 
+    algo = batch_name.split('/')[-1]
+
+    end_reward = end_rewards[algo]
+
     n_agent = rewards.shape[1]
     labels = [f'Agent{i + 1}' for i in range(n_agent)] + ['Global']
 
@@ -248,14 +300,14 @@ def plot_results(episode, batch_name, results, config):
 
     def _extract_end_reward():
         for i, r in enumerate(rewards):
-            if len(end_rewards) < i + 1:
-                end_rewards.update({f'Agent{i}': [r[-1]]})
+            if len(end_reward) < i + 1:
+                end_reward.update({f'Agent{i}': [r[-1]]})
             else:
-                end_rewards[f'Agent{i}'].append(r[-1])
-        if len(end_rewards) < n_agent + 1:
-            end_rewards.update({'Global': [global_reward[-1]]})
+                end_reward[f'Agent{i}'].append(r[-1])
+        if len(end_reward) < n_agent + 1:
+            end_reward.update({'Global': [global_reward[-1]]})
         else:
-            end_rewards['Global'].append(global_reward[-1])
+            end_reward['Global'].append(global_reward[-1])
 
     _extract_end_reward()
 
@@ -323,7 +375,7 @@ def plot_results(episode, batch_name, results, config):
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Reward')
-        for end_r, label, color in zip(end_rewards.values(), labels, colors):
+        for end_r, label, color in zip(end_reward.values(), labels, colors):
             plt.plot(end_r, label=label, color=color)
         plt.legend()
         plt.tight_layout()

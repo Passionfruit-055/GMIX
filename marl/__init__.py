@@ -5,12 +5,15 @@ import random
 import logging
 import os
 import scipy.io as sio
-import matplotlib.pyplot as plt
+import torch
 
 from .mylogger import init_logger
 from algo.qmix import QMIXAgent, losses
 from algo.comm import CommAgent
 from env import config_env
+import matplotlib.pyplot as plt
+
+# from marl.plot import plot_results
 
 now = datetime.now()
 today = now.strftime("%m.%d")
@@ -25,12 +28,17 @@ save_this_batch = True
 tot_episode = 0
 seq_len = 0
 
-end_rewards = []
-
 batch_supervisor = iter([0])
 exp_name = ''
 
 logger = None
+
+end_rewards = []
+
+env_name = ''
+map_name = ''
+
+need_guide, communicate = True, True
 
 
 def _count_folders(path):
@@ -70,7 +78,7 @@ def running_config(config, info):
     logger = init_logger(config['experiment']['logger'],
                          log_path=rootpath + exp_name if save_this_batch else rootpath)
     logger.info(f"\nRun it for: {info}")
-    logger.info(f"This batch is{'' if save_this_batch else ' NOT'} recorded!")
+    logger.info(f"Current experiment is{'' if save_this_batch else ' NOT'} recorded!")
 
     # set seed
     seed = set_seed(config['experiment']['running'].get('seed', 21))
@@ -86,27 +94,34 @@ def running_config(config, info):
     seq_len = config['experiment']['running'].get('timestep', 100)
 
     global end_rewards
-    end_rewards = {str(batch): [] for batch in batches}
+    end_rewards = {str(batch): {} for batch in batches}
 
     return batch_num, seed, tot_episode, seq_len, logger
 
 
-def one_batch_basic_preparation(config):
+def one_batch_basic_preparation(config, env):
+    env.reset()
+
     this_batch = next(batch_supervisor)
+    logger.info(f"This batch is for {this_batch}")
 
     def _parse_this_batch():
         if this_batch.find('mix') != -1:
             config['model'].update({'guide': False, 'comm': False})
             if this_batch.find('g') != -1:
                 config['model'].update({'guide': True})
-                logger.info(f"need guide")
+                logger.info(f"add guide")
             if this_batch.find('c') != -1:
                 config['model'].update({'comm': True})
-                logger.info(f"need communication")
+                logger.info(f"add communication")
 
     _parse_this_batch()
 
-    batch_name = '/' if not save_this_batch else exp_name + '/' + str(this_batch) + '/'
+    global need_guide, communicate
+    need_guide = config['model'].get('guide', True)
+    communicate = config['model'].get('comm', True)
+
+    batch_name = exp_name + '/' + str(this_batch) + '/'
 
     if save_this_batch:
         # create result folder for this batch
@@ -137,13 +152,12 @@ def set_seed(seed):
 
 def make_env(config):
     env = None
-    logger = logging.getLogger()
 
     env_name = config.get('env_name', "Undefined")
     logger.info(f"ENV: {env_name}")
 
     map_name = config.get('map_name', None)
-    logger.info(f"MAP: {map_name}")
+    logger.info(f"MAP: {map_name}\n")
 
     env_config = config_env(mode=config.get('param', 'preset'), env=env_name, map=map_name)
 
@@ -178,7 +192,7 @@ def match_agent(config):
     config['model'].update(config['env'])
     config['model'].update(config['experiment']['running'])
     algo = config.get('model', {}).get('algo', 'qmix')
-    comm_agent = CommAgent(config['model']) if config['model']['comm'] else None
+    comm_agent = CommAgent(config['model']) if communicate else None
     if algo == 'qmix':
         q_agent = QMIXAgent(config['model'])
     else:
@@ -187,9 +201,6 @@ def match_agent(config):
 
 
 def run_one_scenario(config, seed, env, comm_agent, agent):
-    need_guide = config['model'].get('guide', True)
-    communicate = config['model'].get('comm', True)
-
     results = []
     observations, infos = env.reset(seed)
     n_agent = len(env.agents)
@@ -197,10 +208,11 @@ def run_one_scenario(config, seed, env, comm_agent, agent):
     agent.reset_hidden_state(seq_len=1)
     # raw_env 是 parallel_env 的一个属性
     while env.agents:
-        done = True if True in dones else False
+        done = False if False in dones else True
         observations = np.array(list(observations.values()), dtype=np.float32)
 
-        e_obs = comm_agent.communication_round(observations, done) if communicate else observations
+        e_obs = comm_agent.communication_round(observations, done) if communicate else torch.from_numpy(
+            observations).to(agent.device)
 
         actions, warning_signals = agent.choose_actions(e_obs)
 
@@ -222,20 +234,27 @@ def store_results(episode, batch_name, agent, results):
 
     obs, actions, rewards, mus, dones = [], [], [], [], []
     for result in results:
-        for elem, category in zip(result, [obs, actions, rewards, mus, dones]):
+        for elem, category, c_name in zip(result, [obs, actions, rewards, mus, dones],
+                                          ['obs', 'actions', 'rewards', 'mus', 'dones']):
             if isinstance(elem, dict):
                 values = np.array(list(elem.values()))
             elif isinstance(elem, list):
                 values = np.array(elem)
             elif isinstance(elem, np.ndarray):
                 values = elem
+            elif isinstance(elem, torch.Tensor):
+                values = elem.detach().cpu().numpy()
+            elif elem is None:
+                values = None
+            else:
+                raise TypeError(f"{c_name}'s type {type(elem)} need process!")
             category.append(values)
 
     # to ndarray (T, N, size)
     obs = np.array(obs).reshape(seq_len, n_agent, -1)
     actions = np.array(actions, dtype=np.int64).reshape(seq_len, n_agent, -1)
     rewards = np.array(rewards).reshape(seq_len, n_agent, -1)
-    mus = np.array(mus).reshape(seq_len, n_agent, -1)
+    mus = np.array(mus).reshape(seq_len, n_agent, -1) if need_guide else np.zeros((seq_len, n_agent, 1))
     dones = np.array(dones).reshape(seq_len, n_agent, -1)
 
     truncations = []
@@ -269,10 +288,16 @@ def store_results(episode, batch_name, agent, results):
     return obs, actions, rewards, n_obs, dones, states, n_states, mus
 
 
+def train_agent(config, comm_agent, agent):
+    # comm_agent 每一个communication round都会进行train, 这里仅考虑GMIX的train过程
+    autograd_detect = not save_this_batch
+    agent.train(autograd_detect)
+
+
 def plot_results(episode, batch_name, results, config):
     obs, actions, rewards, n_obs, dones, states, n_states, mus = results
 
-    algo = batch_name.split('/')[-1]
+    algo = batch_name.split('/')[-2]
 
     end_reward = end_rewards[algo]
 
@@ -364,11 +389,11 @@ def plot_results(episode, batch_name, results, config):
         plt.plot(losses, color=random.choice(colors))
         if save_this_batch:
             plt.savefig(rootpath + batch_name + folder[1] + f'/losses.png')
-            plt.savefig(rootpath + batch_name + folder[1] + f'/losses.pdf')
+            # plt.savefig(rootpath + batch_name + folder[1] + f'/losses.pdf')
         else:
             pass
-            if episode % (tot_episode // 10) == 0:
-                plt.show()
+            # if episode % (tot_episode // 10) == 0:
+            #     plt.show()
         plt.close()
 
     def _end_reward():
@@ -381,11 +406,11 @@ def plot_results(episode, batch_name, results, config):
         plt.tight_layout()
         if save_this_batch:
             plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeReward.png')
-            plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeReward.pdf')
+            # plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeReward.pdf')
         else:
             pass
-            if episode % (tot_episode // 10) == 0:
-                plt.show()
+            # if episode % (tot_episode // 10) == 0:
+            #     plt.show()
         plt.close()
 
     _rewards()
@@ -394,7 +419,32 @@ def plot_results(episode, batch_name, results, config):
     _losses()
 
 
-def train_agent(config, comm_agent, agent):
-    # comm_agent 每一个communication round都会进行train, 这里仅考虑GMIX的train过程
-    autograd_detect = not save_this_batch
-    agent.train(autograd_detect)
+def exp_summary():
+    summary_path = rootpath + exp_name + '/summary/'
+    if not os.path.exists(summary_path):
+        os.mkdir(summary_path)
+
+    last_rewards = {}
+
+    plt.figure()
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    colors = plt.colormaps.get_cmap('Set3').colors
+    for algo, color in zip(end_rewards.keys(), colors):
+        last_rewards.update({algo: end_rewards[algo]['Global']})
+        plt.plot(end_rewards[algo]['Global'], label=algo, color=random.choice(colors))
+    plt.legend()
+    plt.tight_layout()
+    if save_this_batch:
+        plt.savefig(summary_path + f'/Reward.png')
+        plt.savefig(summary_path + f'/Reward.pdf')
+
+        # store the mete data of this pic
+        sio.savemat(summary_path + '/rewards.mat', last_rewards)
+    else:
+        pass
+        # if episode % (tot_episode // 10) == 0:
+        #     plt.show()
+    plt.close()
+
+

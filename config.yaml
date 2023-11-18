@@ -5,8 +5,8 @@ experiment:
     file_handler_path: ''
   running:
     seed: 0
-    episode: 1
-    timestep: 1
+    episode: 2000
+    timestep: 1000  # max_timestep, goto env param to set specific length
     buffer_size: 128
     batch_size: 32
     epoch: 1

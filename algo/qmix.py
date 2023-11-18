@@ -181,11 +181,16 @@ class QMIXAgent(object):
 
     def choose_actions(self, obs):
         assert self.hidden_state is not None, "Hidden state hasn't been reset!"
-        obs = torch.tensor(obs, dtype=torch.float32).view(self.n_agent, -1).to(self.device)
+
+        if isinstance(obs, torch.Tensor):
+            obs = obs.view(self.n_agent, -1).to(self.device)
+        else:
+            obs = torch.tensor(obs, dtype=torch.float32).view(self.n_agent, -1).to(self.device)
 
         pre_actions, Qvals = self._compute_Q_vals(obs)
 
         if self.need_guide:
+            Qvals = Qvals.tolist()
             warning_signals = self._generate_warning_signals(obs.cpu().detach().numpy())
             obs = torch.cat([obs, torch.tensor(warning_signals, dtype=torch.float32).to(self.device)], dim=-1)
             Gvals = self._compute_G_vals(obs)
@@ -196,6 +201,7 @@ class QMIXAgent(object):
         actions = []
         for a in range(self.n_agent):
             if random.random() > self.epsilon:
+                # argmax only takes tensor as input
                 actions.append(torch.argmax(Qvals[a], dim=0).item())
             else:
                 actions.append(random.choice(range(self.action_space)))
@@ -211,7 +217,8 @@ class QMIXAgent(object):
                 pre_actions.append(torch.argmax(Qval[0], dim=0).item())
             else:
                 pre_actions.append(random.choice(range(self.action_space)))
-            Qvals.append(Qval.cpu().detach().numpy())
+            Qvals.append(Qval.cpu().detach())
+        Qvals = torch.vstack(Qvals).reshape(self.n_agent, -1)
         return pre_actions, Qvals
 
     def _compute_G_vals(self, obs):

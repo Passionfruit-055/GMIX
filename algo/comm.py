@@ -43,7 +43,7 @@ class CommAgent(object):
         self.epsilon = config.get("epsilon", 0.2)
         self.sigma = config.get("sigma", 3)
 
-        buffer_size = self.max_episode_len = config.get("timestep", 1000)  # 记录的是一个episode的数据，要够长
+        buffer_size = self.max_episode_len = config.get("timestep", 1000) + 1 # 记录的是一个episode的数据，要够长
 
         self.comm_round = 0
 
@@ -83,7 +83,7 @@ class CommAgent(object):
         self.target_model.load_state_dict(self.model.state_dict())
         self.params.extend(list(self.model.parameters()))
 
-    def communication_round(self, obs, pos, params=None, done=False):
+    def communication_round(self, obs, done=False, params=None):
         # add here to provide a protection
         if done:
             logger = logging.getLogger()
@@ -93,11 +93,13 @@ class CommAgent(object):
         pos = self._extract_agent_pos(obs)
 
         self.comm_round += 1
+
         states = self.state_formulation(pos, obs, params)
         # do not save first and last
         # 在这一时刻将上一个时刻的历史存入，当前时刻状态充当下一时刻状态
         if self.states is not None:
             self.memory.add(self.states, self.modes, self.rewards, states)
+
         self.states = states
 
         self.choose_comm_modes(states)
@@ -280,7 +282,7 @@ class CommAgent(object):
 
     def train(self):
         self.train_step += 1
-        batch_size = min(self.config.get("batch_size", 32), self.comm_round - 1)
+        batch_size = min(self.config.get("batch_size", 32), max(self.comm_round - 1, 0))
         minibatch = self.memory.sample_batch(batch_size)
         for batch in minibatch:
             states, actions, rewards, n_states = batch

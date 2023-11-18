@@ -13,16 +13,17 @@ config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 
 
 if __name__ == '__main__':
-    info = 'testagentoption'  # inject 'test' to open the debug mode
+    info = 'run4awhile'  # inject 'test' to open the debug mode
 
     total_batch, seed, episode, seq_len, logger = running_config(config, info)
+
+    # make env
+    env = make_env(config['env'])
 
     for _ in range(total_batch):
 
         try:
-            batch_name = one_batch_basic_preparation(config)
-            # make env
-            env = make_env(config['env'])
+            batch_name = one_batch_basic_preparation(config, env)
             # init agent
             CommAgent, GMIXAgent = match_agent(config)
             # run experiment
@@ -37,3 +38,5 @@ if __name__ == '__main__':
             logger.error(e)
             tb = e.__traceback__
             traceback.print_tb(tb)
+
+    exp_summary()

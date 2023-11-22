@@ -6,6 +6,7 @@ import logging
 import os
 import scipy.io as sio
 import torch
+from collections import deque
 
 from .mylogger import init_logger
 from algo.qmix import QMIXAgent, losses
@@ -13,17 +14,18 @@ from algo.comm import CommAgent
 from env import config_env
 import matplotlib.pyplot as plt
 
-# from marl.plot import plot_results
-
 now = datetime.now()
 today = now.strftime("%m.%d")
 current_time = now.strftime("%H_%M")
 rootpath = './results/' + today + '/'
 if not os.path.exists(rootpath):
     os.makedirs(rootpath)
-folder = ['/' + f + '/' for f in ['data', 'fig', 'video']]
+folder = ['/' + f + '/' for f in ['data', 'fig', 'replay', 'tensorboard']]
 
 save_this_batch = True
+save_pdf = True
+
+tensorboard_writer = None
 
 tot_episode = 0
 seq_len = 0
@@ -39,6 +41,8 @@ env_name = ''
 map_name = ''
 
 need_guide, communicate = True, True
+
+danger_zones = {}
 
 
 def _count_folders(path):
@@ -72,6 +76,9 @@ def running_config(config, info):
 
     global save_this_batch
     save_this_batch = False if info.find('test') != -1 or running_mode == 'debug' else True
+
+    global save_pdf
+    save_pdf = config['experiment']['running'].get('save_pdf', False)
 
     # prepare logger
     global logger
@@ -123,11 +130,24 @@ def one_batch_basic_preparation(config, env):
 
     batch_name = exp_name + '/' + str(this_batch) + '/'
 
+    def _launch_tensorboard():
+        from torch.utils.tensorboard import SummaryWriter
+        global tensorboard_writer
+        tensorboard_writer = SummaryWriter(rootpath + batch_name + folder[3])
+        os.system(f"tensorboard --logdir={rootpath + batch_name + folder[3]}")
+
     if save_this_batch:
         # create result folder for this batch
         for f in folder:
             if not os.path.exists(rootpath + batch_name + f):
                 os.makedirs(rootpath + batch_name + f)
+
+        # _launch_tensorboard()
+
+    losses.clear()
+
+    global danger_zones
+    danger_zones[this_batch] = {}
 
     return batch_name
 
@@ -200,7 +220,7 @@ def match_agent(config):
     return comm_agent, q_agent
 
 
-def run_one_scenario(config, seed, env, comm_agent, agent):
+def run_one_episode(config, seed, env, comm_agent, agent):
     results = []
     observations, infos = env.reset(seed)
     n_agent = len(env.agents)
@@ -211,7 +231,7 @@ def run_one_scenario(config, seed, env, comm_agent, agent):
         done = False if False in dones else True
         observations = np.array(list(observations.values()), dtype=np.float32)
 
-        e_obs = comm_agent.communication_round(observations, done) if communicate else torch.from_numpy(
+        e_obs, comm_reward = comm_agent.communication_round(observations, done) if communicate else torch.from_numpy(
             observations).to(agent.device)
 
         actions, warning_signals = agent.choose_actions(e_obs)
@@ -219,9 +239,11 @@ def run_one_scenario(config, seed, env, comm_agent, agent):
         observations, rewards, terminations, truncations, infos = env.step(
             {agent: action for agent, action in zip(env.agents, actions)})  # 传进去的需要是一个字典
 
+        utilities = agent.compute_utility(rewards, warning_signals)
+
         dones = list(map(lambda x, y: x or y, terminations.values(), truncations.values()))
 
-        results.append([e_obs, actions, rewards, warning_signals, dones])
+        results.append([e_obs, actions, utilities, warning_signals, dones])
 
     env.close()
 
@@ -254,7 +276,7 @@ def store_results(episode, batch_name, agent, results):
     obs = np.array(obs).reshape(seq_len, n_agent, -1)
     actions = np.array(actions, dtype=np.int64).reshape(seq_len, n_agent, -1)
     rewards = np.array(rewards).reshape(seq_len, n_agent, -1)
-    mus = np.array(mus).reshape(seq_len, n_agent, -1) if need_guide else np.zeros((seq_len, n_agent, 1))
+    mus = np.array(mus).reshape(seq_len, n_agent, -1)
     dones = np.array(dones).reshape(seq_len, n_agent, -1)
 
     truncations = []
@@ -266,7 +288,7 @@ def store_results(episode, batch_name, agent, results):
         return obs.copy().reshape(seq_len, -1)
 
     states = _formulate_system_state(obs, seq_len)
-    # n_obs和n_states要在结尾填充一条记录
+    # n_obs 和 n_states 要在结尾填充一条记录
     n_obs = np.append(obs[1:].copy(), obs[-1]).reshape(seq_len, n_agent, -1)
     n_states = np.append(states[1:].copy(), states[-1]).reshape(seq_len, -1)
 
@@ -288,7 +310,7 @@ def store_results(episode, batch_name, agent, results):
     return obs, actions, rewards, n_obs, dones, states, n_states, mus
 
 
-def train_agent(config, comm_agent, agent):
+def train_agent(comm_agent, agent):
     # comm_agent 每一个communication round都会进行train, 这里仅考虑GMIX的train过程
     autograd_detect = not save_this_batch
     agent.train(autograd_detect)
@@ -302,7 +324,7 @@ def plot_results(episode, batch_name, results, config):
     end_reward = end_rewards[algo]
 
     n_agent = rewards.shape[1]
-    labels = [f'Agent{i + 1}' for i in range(n_agent)] + ['Global']
+    labels = [f'Agent{i}' for i in range(n_agent)] + ['Global']
 
     def _save_mode():
         keep_live = config.get('keep_live', True)
@@ -348,17 +370,17 @@ def plot_results(episode, batch_name, results, config):
 
     def _rewards():
         fig, axes = plt.subplots(1, n_agent + 1, figsize=((n_agent + 1) * 6 + 2, 6))
-        labels = [f'Agent{i + 1}' for i in range(n_agent)] + ['Global']
         for ax, label, reward, color in zip(axes, labels, (rewards[0], rewards[1], global_reward), colors):
             ax.plot(reward, color=color, label=label)
             ax.set_xlabel('Timestep')
             ax.set_ylabel('Reward')
             ax.legend()
-        fig.suptitle('Episode ' + str(episode))
+        fig.suptitle(algo.upper() + ' Episode ' + str(episode))
         plt.tight_layout()
         if save_this_batch:
-            plt.savefig(rootpath + batch_name + folder[1] + f'/live/{episode % recent_num}_rewards.png')
-            plt.savefig(rootpath + batch_name + folder[1] + f'/live/{episode % recent_num}_rewards.pdf')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/live/rewards_{episode % recent_num}.png')
+            if save_pdf:
+                plt.savefig(rootpath + batch_name + folder[1] + f'/live/rewards_{episode % recent_num}.pdf')
         else:
             pass
             # plt.show()
@@ -371,11 +393,12 @@ def plot_results(episode, batch_name, results, config):
         plt.legend()
         plt.xlabel('Timestep')
         plt.ylabel('Reward')
-        plt.title('Episode ' + str(episode))
+        plt.title(algo.upper() + ' Episode ' + str(episode))
         plt.tight_layout()
         if save_this_batch:
-            plt.savefig(rootpath + batch_name + folder[1] + f'/live/{episode % recent_num}_rewards_in_one.png')
-            plt.savefig(rootpath + batch_name + folder[1] + f'/live/{episode % recent_num}_rewards_in_one.pdf')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/live/rewards_{episode % recent_num}_in_one.png')
+            if save_pdf:
+                plt.savefig(rootpath + batch_name + folder[1] + f'/live/rewards_{episode % recent_num}_in_one.pdf')
         else:
             pass
             # plt.show()
@@ -385,11 +408,12 @@ def plot_results(episode, batch_name, results, config):
         plt.figure()
         plt.xlabel('Timestep')
         plt.ylabel('Losses')
-        plt.title('Until episode ' + str(episode))
+        plt.title(algo.upper() + ' Until episode ' + str(episode))
         plt.plot(losses, color=random.choice(colors))
         if save_this_batch:
             plt.savefig(rootpath + batch_name + folder[1] + f'/losses.png')
-            # plt.savefig(rootpath + batch_name + folder[1] + f'/losses.pdf')
+            if save_pdf:
+                plt.savefig(rootpath + batch_name + folder[1] + f'/losses.pdf')
         else:
             pass
             # if episode % (tot_episode // 10) == 0:
@@ -404,9 +428,56 @@ def plot_results(episode, batch_name, results, config):
             plt.plot(end_r, label=label, color=color)
         plt.legend()
         plt.tight_layout()
+        plt.title(algo.upper())
         if save_this_batch:
             plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeReward.png')
-            # plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeReward.pdf')
+            if save_pdf:
+                plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeReward.pdf')
+        else:
+            pass
+            # if episode % (tot_episode // 10) == 0:
+            #     plt.show()
+        plt.close()
+
+    def _dangers():
+        mus_all = np.sum(mus, axis=1)
+        fig, axes = plt.subplots(1, n_agent + 1, figsize=((n_agent + 1) * 6 + 2, 6))
+        for ax, label, danger, color in zip(axes, labels, [mus[0], mus[1], mus_all], colors):
+            ax.plot(danger, color=color, label=label)
+            ax.set_xlabel('Timestep')
+            ax.set_ylabel('Dangers')
+            ax.legend()
+        fig.suptitle(algo + ' Episode ' + str(episode))
+        plt.tight_layout()
+        if save_this_batch:
+            plt.savefig(rootpath + batch_name + folder[1] + f'/live/dangers_{episode % recent_num}.png')
+            if save_pdf:
+                plt.savefig(rootpath + batch_name + folder[1] + f'/live/dangers_{episode % recent_num}.pdf')
+        else:
+            pass
+            # plt.show()
+        plt.close()
+
+        global danger_zones
+        for label, danger in zip(labels, [mus[:, 0, :].sum(), mus[:, 1, :].sum(), mus_all.sum()]):
+            if label not in danger_zones[algo]:
+                danger_zones[algo][label] = deque(maxlen=int(1e4))
+            danger_zones[algo][label].append(danger)
+
+    def _end_dangers():
+        # times reaches the danger zone per episode
+        plt.figure()
+        plt.xlabel('Episode')
+        plt.ylabel('Times reaches danger zones')
+        for danger, label, color in zip(danger_zones[algo].values(), labels, colors):
+            plt.plot(danger, label=label, color=color)
+        plt.legend()
+        plt.title(algo.upper())
+        plt.tight_layout()
+        if save_this_batch:
+            plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeDanger.png')
+            if save_pdf:
+                plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeDanger.pdf')
         else:
             pass
             # if episode % (tot_episode // 10) == 0:
@@ -417,34 +488,62 @@ def plot_results(episode, batch_name, results, config):
     _reward_in_one()
     _end_reward()
     _losses()
+    _dangers()
+    _end_dangers()
 
 
 def exp_summary():
-    summary_path = rootpath + exp_name + '/summary/'
-    if not os.path.exists(summary_path):
-        os.mkdir(summary_path)
+    def _reward_summary():
+        last_rewards = {}
+        plt.figure()
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        colors = plt.colormaps.get_cmap('Accent').colors
+        for algo, color in zip(end_rewards.keys(), colors):
+            last_rewards.update({algo: end_rewards[algo]['Global']})
+            plt.plot(end_rewards[algo]['Global'], label=algo, color=color, linewidth=1.5)
+        plt.legend()
+        plt.tight_layout()
+        if save_this_batch:
+            summary_path = rootpath + exp_name + '/summary/'
+            if not os.path.exists(summary_path):
+                os.mkdir(summary_path)
+            plt.savefig(summary_path + f'/Reward.png')
+            if save_pdf:
+                plt.savefig(summary_path + f'/Reward.pdf')
+            # store the mete data of this pic
+            sio.savemat(summary_path + '/rewards.mat', last_rewards)
 
-    last_rewards = {}
-
-    plt.figure()
-    plt.xlabel('Episode')
-    plt.ylabel('Reward')
-    colors = plt.colormaps.get_cmap('Set3').colors
-    for algo, color in zip(end_rewards.keys(), colors):
-        last_rewards.update({algo: end_rewards[algo]['Global']})
-        plt.plot(end_rewards[algo]['Global'], label=algo, color=random.choice(colors))
-    plt.legend()
-    plt.tight_layout()
-    if save_this_batch:
-        plt.savefig(summary_path + f'/Reward.png')
-        plt.savefig(summary_path + f'/Reward.pdf')
-
-        # store the mete data of this pic
-        sio.savemat(summary_path + '/rewards.mat', last_rewards)
-    else:
-        pass
+        else:
+            pass
         # if episode % (tot_episode // 10) == 0:
         #     plt.show()
-    plt.close()
+        plt.close()
 
+    def _danger_summary():
+        all_dangers = {}
+        colors = plt.colormaps.get_cmap('Set1').colors
+        plt.figure()
+        plt.xlabel('Episode')
+        plt.ylabel('Danger')
+        for algo, color in zip(danger_zones.keys(), colors):
+            all_dangers.update({algo: danger_zones[algo]['Global']})
+            plt.plot(danger_zones[algo]['Global'], label=algo, color=color, linewidth=1.5)
+        plt.legend()
+        plt.tight_layout()
+        if save_this_batch:
+            summary_path = rootpath + exp_name + '/summary/'
+            plt.savefig(summary_path + f'/Danger.png')
+            if save_pdf:
+                plt.savefig(summary_path + f'/Danger.pdf')
+            # store the mete data of this pic
+            sio.savemat(summary_path + '/Danger.mat', all_dangers)
 
+        else:
+            pass
+        # if episode % (tot_episode // 10) == 0:
+        #     plt.show()
+        plt.close()
+
+    _reward_summary()
+    _danger_summary()

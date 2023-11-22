@@ -1,15 +1,12 @@
 import logging
-
-from model.mlp import MLP
-
-from marl.ReplayBuffer import ReplayBuffer
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
 import random
 import numpy as np
+from collections import deque
+
+from model.mlp import MLP
+from marl.ReplayBuffer import ReplayBuffer
 
 
 class CommAgent(object):
@@ -43,7 +40,7 @@ class CommAgent(object):
         self.epsilon = config.get("epsilon", 0.2)
         self.sigma = config.get("sigma", 3)
 
-        buffer_size = self.max_episode_len = config.get("timestep", 1000) + 1 # 记录的是一个episode的数据，要够长
+        buffer_size = self.max_episode_len = config.get("timestep", 1000) + 1  # 记录的是一个episode的数据，要够长
 
         self.comm_round = 0
 
@@ -63,14 +60,18 @@ class CommAgent(object):
         # expanded obs, pass to GMIX
         self.obs = np.zeros((self.n_agent, self.config["obs_space"]))
 
-        # obs_to_policy_agent: e_obs + mode + onehot
-        self.config.update({"obs_space": self.config["obs_space"] * self.n_agent + 1 + self.n_agent})
+        # self.config.update({"obs_space": self.config["obs_space"] * self.n_agent + 1 + self.n_agent})
+        # obs_to_policy_agent: modified_obs + mode + onehot (not expand it)
+        self.config.update({"obs_space": self.config["obs_space"] + 1 + self.n_agent})
+        # check whether include the additional training info
         self.config.update({"state_space": self.config["obs_space"] * self.n_agent})
 
     def _build_model(self):
+
         share_param = self.config.get("share_param", False)
         share = self.config.get("share", False)
-        self.action_space = action_space = 3 if not share_param else 4
+        self.action_space = action_space = 11 if not share_param else 0
+        assert action_space != 0, "Wrong communication modes for comm agent!"
         self.state_space = state_space = self.config['obs_space'] * 2 + 4 + self.n_agent if share else 0
 
         hidden_l1_dim = self.config["hidden_l1_dim"]
@@ -98,7 +99,9 @@ class CommAgent(object):
         # do not save first and last
         # 在这一时刻将上一个时刻的历史存入，当前时刻状态充当下一时刻状态
         if self.states is not None:
-            self.memory.add(self.states, self.modes, self.rewards, states)
+            for s, a, r, ns in zip(self.states, self.modes, self.rewards, states):
+                self.memory.add(s, a, r, ns)
+            # self.memory.add(self.states, self.modes, self.rewards, states)
 
         self.states = states
 
@@ -106,14 +109,15 @@ class CommAgent(object):
 
         self.compute_reward()
 
-        e_obs = self.expand_obs(obs, self._prepare_message(obs, params))
+        obs_new = self.modify_obs(obs, self.prepare_message(obs, params))
 
         self.obs = obs
 
         # 不涉及时序，每一个timestep都可以做更新
         self.train()
 
-        return np.concatenate((e_obs, self.modes.reshape((self.n_agent, 1)), np.eye(self.n_agent)), axis=1)
+        return np.concatenate((obs_new, self.modes.reshape((self.n_agent, 1)), np.eye(self.n_agent)),
+                              axis=1), self.rewards
 
     def state_formulation(self, pos, obs, params=None):
         obs = np.array(obs, dtype=np.float32).reshape((self.n_agent, -1))
@@ -216,20 +220,6 @@ class CommAgent(object):
 
         self.modes = np.array(self.modes, dtype=np.int32)
 
-    def _prepare_message(self, obs, params=None):
-        actions = self.modes.tolist()
-        assert params is None, "to be developed!"
-        msgs = []
-        for sender in range(self.n_agent):
-            action, ob, pre_ob = actions[sender], obs[sender], self.obs[sender]
-            blank_msg = np.zeros(ob.shape)
-            param = params[sender] if params is not None else None
-            msg_kinds = (blank_msg, pre_ob, ob, (ob, param))
-            msg = msg_kinds[action]
-            msgs.append(msg)
-        msgs = np.array(msgs, dtype=np.float32).reshape((self.n_agent, -1))
-        return msgs
-
     def _receive_permission(self, dist, queue_delay):
         # 利用排队和距离来确定消息能不能发到接受者一方
         # dim=0 行 recevier
@@ -244,28 +234,66 @@ class CommAgent(object):
         # 对角线清零
         self.receive[np.eye(self.n_agent, dtype=np.bool)] = 0
 
-    def expand_obs(self, obs, msgs):
-        e_obs = None
-        blank_msg = np.zeros(obs[0].shape)
-        for receiver in range(self.n_agent):
-            e_ob = obs[receiver].copy()
+    def modify_obs(self, obs, msgs):
+        new_obs = None
+
+        def _expand():
+            nonlocal new_obs
+            blank_msg = np.zeros(obs[0].shape)
+            for receiver in range(self.n_agent):
+                new_ob = obs[receiver].copy()
+                for sender in range(self.n_agent):
+                    if receiver != sender:
+                        if self.receive[receiver][sender]:
+                            new_ob = np.concatenate((new_ob, msgs[sender]), axis=0)
+                        else:
+                            new_ob = np.concatenate((new_ob, blank_msg), axis=0)
+                new_obs = np.vstack((new_obs, new_ob)) if new_obs is not None else new_ob
+
+        def _replace():
+            nonlocal new_obs
+            new_obs = obs.copy()
+            new_obs[:, -msgs.shape[1]:] = msgs
+
+        _replace()
+
+        return new_obs
+
+    def prepare_message(self, obs, params=None):
+        msgs = []
+
+        def _specific_data():
+            nonlocal msgs
+            actions = self.modes.tolist()
+            assert params is None, "to be developed!"
             for sender in range(self.n_agent):
-                if receiver != sender:
-                    if self.receive[receiver][sender]:
-                        e_ob = np.concatenate((e_ob, msgs[sender]), axis=0)
-                    else:
-                        e_ob = np.concatenate((e_ob, blank_msg), axis=0)
-            e_obs = np.vstack((e_obs, e_ob)) if e_obs is not None else e_ob
-        # 保证每个agent的obs维度一致
-        return e_obs
+                action, ob, pre_ob = actions[sender], obs[sender], self.obs[sender]
+                blank_msg = np.zeros(ob.shape)
+                param = params[sender] if params is not None else None
+                msg_kinds = (blank_msg, pre_ob, ob, (ob, param))
+                msg = msg_kinds[action]
+                msgs.append(msg)
+            msgs = np.array(msgs, dtype=np.float32).reshape((self.n_agent, -1))
+
+        def _abstract_data():
+            nonlocal msgs
+            msglist = np.vstack((np.eye(self.action_space - 1), np.zeros((self.action_space - 1,))))
+            msgs = [msglist[self.modes[sender]] for sender in range(self.n_agent)]
+            msgs = np.array(msgs, dtype=np.float32).reshape((self.n_agent, -1))
+
+        def _msg_pool():
+            # TODO use AoI to judge whether use current msg or choose one from previous but still fresh
+            pass
+
+        _abstract_data()
+        return msgs
 
     def compute_reward(self):
-        # encourage to communicate, modes that transmit more infos score higher,AoI to give negative feedback
+        # encourage to communicate, AoI to give negative feedback
         o1 = 1
-        o2 = 0.5
-        o3 = 0.8
+        o2 = 0.8
         AoI = np.mean(self.AoI_history, axis=1)
-        rewards = o1 * self.rewards + o2 * self.modes - o3 * AoI
+        rewards = o1 * self.rewards - o2 * AoI
         self.rewards = rewards
 
     def _compute_overhead(self, dist, queue_delay):

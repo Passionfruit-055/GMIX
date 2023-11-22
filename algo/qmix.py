@@ -189,14 +189,13 @@ class QMIXAgent(object):
 
         pre_actions, Qvals = self._compute_Q_vals(obs)
 
+        warning_signals = self._generate_warning_signals(obs.cpu().detach().numpy())
+
         if self.need_guide:
             Qvals = Qvals.tolist()
-            warning_signals = self._generate_warning_signals(obs.cpu().detach().numpy())
             obs = torch.cat([obs, torch.tensor(warning_signals, dtype=torch.float32).to(self.device)], dim=-1)
             Gvals = self._compute_G_vals(obs)
             Qvals = self._modify_Q_vals(Qvals, Gvals)
-        else:
-            warning_signals = None
 
         actions = []
         for a in range(self.n_agent):
@@ -238,12 +237,12 @@ class QMIXAgent(object):
         # warning signal include external knowledge, should customize for different scenarios
         scenario = self.config.get('scenario', None)
         assert scenario is not None, "Undefined scenario!"
-        warning_signals = np.zeros((self.n_agent, 1), dtype=np.int32)
+        warning_signals = np.zeros((self.n_agent, 1), dtype=np.float32)
         if scenario == 'mpe_reference':
             # reference环境的风险来自于当前agent与其他agent的距离，与自己目标的距离
             # map是一个2x2的地图，定义agent之间的安全距离为1，定义agent与landmark的安全距离为1
-            a2a_safe_dist = 1
-            a2l_safe_dist = 1
+            a2a_safe_dist = 0.5
+            a2l_safe_dist = 1.5
             pos = obs[:, 0:2]
             dist = obs[:, 2:8].reshape(self.n_agent, -1, 2)
             for a1 in range(self.n_agent):
@@ -256,7 +255,20 @@ class QMIXAgent(object):
                 for d in dist[a1]:
                     if np.linalg.norm(d) > a2l_safe_dist:
                         warning_signals[a1] += 1
+
         return warning_signals
+
+    def compute_utility(self, rewards, warning_signals):
+        # only for mpe_reference
+        # 3 landmarks and 1 teammate, so the upper limit of warning_signal for one agent is 4, 即取值范围是 [0, 4]
+        # 两坐标轴的取值范围都是 [-1,1], reward 取值范围是 [0, 4], 与上面相同所以不存在需要归一化，只用参数调整权重就行
+        rewards = np.array(list(rewards.values()), dtype=np.float32).reshape(self.n_agent, -1)
+        o1 = 1
+        o2 = 0.5
+        assert rewards.shape == warning_signals.shape, "rewards and warning_signals have different shape!"
+        utilities = o1 * rewards - o2 * warning_signals
+        return utilities
+
 
     def load_model(self, scenario):
         logger = logging.getLogger()

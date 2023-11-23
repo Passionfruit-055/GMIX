@@ -309,28 +309,35 @@ class CommAgent(object):
             self.target_model.load_state_dict(self.model.state_dict())
 
     def train(self):
-        self.train_step += 1
         batch_size = min(self.config.get("batch_size", 32), max(self.comm_round - 1, 0))
         minibatch = self.memory.sample_batch(batch_size)
+        if len(minibatch) == 0:
+            return
+
+        self.train_step += 1
+        states, actions, rewards, n_states = None, None, None, None
         for batch in minibatch:
-            states, actions, rewards, n_states = batch
+            s, a, r, ns = batch
+            states = np.vstack((states, s)) if states is not None else s
+            actions = np.hstack((actions, a)) if actions is not None else a
+            rewards = np.hstack((rewards, r)) if rewards is not None else r
+            n_states = np.vstack((n_states, ns)) if n_states is not None else ns
 
-            # 不存在时序的概念，相当于batch_size = agent_size
-            states = torch.tensor(states, dtype=torch.float32).to(self.device)
-            actions = torch.tensor(actions, dtype=torch.long).to(self.device)
-            rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
-            n_states = torch.tensor(n_states, dtype=torch.float32).to(self.device)
+        states = torch.tensor(states, dtype=torch.float32).view((batch_size, -1)).to(self.device)
+        actions = torch.tensor(actions, dtype=torch.long).view((batch_size, -1)).to(self.device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).view((batch_size, -1)).to(self.device)
+        n_states = torch.tensor(n_states, dtype=torch.float32).view((batch_size, -1)).to(self.device)
 
-            q_values = self.model(states)
-            q_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
-            n_q_values = self.target_model(n_states).max(1)[0].detach()
+        q_values = self.model(states)
+        q_values = q_values.gather(1, actions)# .squeeze(1)
+        n_q_values = self.target_model(n_states).max(1)[0].detach().view(rewards.shape)
 
-            expected_q_values = rewards + self.gamma * n_q_values
-            loss = self.criterion(q_values, expected_q_values)
+        expected_q_values = rewards + self.gamma * n_q_values
+        loss = self.criterion(q_values, expected_q_values)
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
     def _add_optim(self):
         config = self.config

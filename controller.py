@@ -13,7 +13,7 @@ config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 
 
 if __name__ == '__main__':
-    info = 'testDangerZone'  # inject 'test' to open the debug mode
+    info = 'test change batch save'  # inject 'test' to open the debug mode
 
     total_batch, seed, episode, seq_len, logger = running_config(config, info)
 

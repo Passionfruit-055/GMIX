@@ -249,8 +249,7 @@ def run_one_episode(seed, env, comm_agent, agent):
         observations = np.array(list(observations.values()), dtype=np.float32)
 
         obs_new, comm_reward = comm_agent.communication_round(observations, rewards.copy(), done) if communicate else (
-        torch.from_numpy(
-            observations).to(agent.device), None)
+            torch.from_numpy(observations).to(agent.device), None)
         global batch_cache
         if comm_reward is not None:
             for c_r in comm_reward:
@@ -260,10 +259,9 @@ def run_one_episode(seed, env, comm_agent, agent):
 
         observations, rewards, terminations, truncations, infos = env.step(
             {agent: action for agent, action in zip(env.agents, actions)})  # 传进去的需要是一个字典
-        danger_times = env.world.danger_infos()
+        danger_times = env.unwrapped.world.danger_infos()
 
         utilities = agent.compute_utility(rewards, warning_signals)
-
         dones = list(map(lambda x, y: x or y, terminations.values(), truncations.values()))
 
         results.append([obs_new, actions, utilities, warning_signals, dones, danger_times])
@@ -318,14 +316,24 @@ def store_results(episode, agent, results):
     agent.store_experience(obs, actions, rewards, n_obs, dones, states, n_states, mus)
 
     def _save_to_mat():
-        filenames = ['rewards.mat', 'actions.mat', 'mus.mat', 'dones.mat']
-        for filename, category in zip(filenames, [rewards, actions, mus, dones]):
+        filenames = ['rewards.mat', 'actions.mat', 'mus.mat', 'dones.mat', 'danger_times.mat']
+        for filename, category in zip(filenames, [rewards, actions, mus, dones, danger_times]):
             if not os.path.exists(rootpath + batch_name + folder[0] + filename):
                 sio.savemat(rootpath + batch_name + folder[0] + filename, {f'episode{episode}': category})
             else:
                 history = sio.loadmat(rootpath + batch_name + folder[0] + filename)
                 history.update({f'episode{episode}': category})
                 sio.savemat(rootpath + batch_name + folder[0] + filename, history)
+
+        keys = ['rewards', 'actions', 'mus', 'dones', 'danger_times']
+        if not os.path.exists(rootpath + batch_name + folder[0] + '/results.mat'):
+            episode_result = {key: [value] for key, value in zip(keys, [rewards, actions, mus, dones, danger_times])}
+            sio.savemat(rootpath + batch_name + folder[0] + '/results.mat', episode_result)
+        else:
+            history = sio.loadmat(rootpath + batch_name + folder[0] + '/results.mat')
+            for key, value in zip(keys, [rewards, actions, mus, dones, danger_times]):
+                history[key].append(value)
+            sio.savemat(rootpath + batch_name + folder[0] + '/results.mat', history)
 
     if save_this_batch:
         _save_to_mat()

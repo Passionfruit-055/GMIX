@@ -13,7 +13,7 @@ config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 
 
 if __name__ == '__main__':
-    info = 'CommReward'  # inject 'test' to open the debug mode
+    info = 'testDangerZone'  # inject 'test' to open the debug mode
 
     total_batch, seed, episode, seq_len, logger = running_config(config, info)
 
@@ -22,7 +22,6 @@ if __name__ == '__main__':
 
     for _ in range(total_batch):
         # try:
-
         one_batch_basic_preparation(config, env)
         # init agent
         CommAgent, TaskAgent = match_agent(config)

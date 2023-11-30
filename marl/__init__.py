@@ -1,18 +1,19 @@
+import logging
 import warnings
 import numpy as np
 from datetime import datetime
 import random
-import logging
 import os
 import scipy.io as sio
 import torch
 from collections import deque
 
 from .mylogger import init_logger
-from algo.qmix import QMIXAgent, losses
+from algo.qmix import QMIXAgent
 from algo.comm import CommAgent
 from env import config_env
 import matplotlib.pyplot as plt
+from .cache import Cache
 
 now = datetime.now()
 today = now.strftime("%m.%d")
@@ -33,22 +34,24 @@ seq_len = 0
 batch_supervisor = iter([0])
 exp_name = ''
 
-logger = None
-
-end_rewards = []
+logger = logging.getLogger()
 
 env_name = ''
 map_name = ''
 
 need_guide, communicate = True, True
 
-danger_zones = {}
-
-comm_rewards = deque(maxlen=int(1e4))
-end_comm_rewards = {}
-
 batch_name = ''
 this_batch_algo = ''
+
+exp_cache = Cache('store results of different batches')
+exp_cache['rewards'] = {}
+exp_cache['dangers'] = {}
+exp_cache['comm_rewards'] = {}
+
+batch_cache = Cache('store results of different episodes')
+batch_cache['comm_rewards'] = deque(maxlen=int(1e4))
+batch_cache['loss'] = deque(maxlen=int(1e4))
 
 
 def _count_folders(path):
@@ -106,8 +109,8 @@ def running_config(config, info):
     tot_episode = config['experiment']['running'].get('episode', 1000)
     seq_len = config['experiment']['running'].get('timestep', 100)
 
-    global end_rewards
-    end_rewards = {str(batch): {} for batch in batches}
+    global exp_cache
+    exp_cache['rewards'] = {str(batch): {} for batch in batches}
 
     return batch_num, seed, tot_episode, seq_len, logger
 
@@ -121,13 +124,12 @@ def one_batch_basic_preparation(config, env):
     logger.info(f"This batch is for {this_batch}")
 
     def _cache():
-        global comm_rewards
-        comm_rewards.clear()
+        global batch_cache
+        batch_cache['comm_rewards'].clear()
+        batch_cache['loss'].clear()
 
-        losses.clear()
-
-        global danger_zones
-        danger_zones[this_batch] = {}
+        global exp_cache
+        exp_cache['dangers'][this_batch] = {}
 
     _cache()
 
@@ -196,9 +198,10 @@ def make_env(config):
 
     if env_name == 'mpe':
         if map_name.find('reference') != -1:
-            from pettingzoo.mpe import simple_reference_v3
+            # from pettingzoo.mpe import simple_reference_v3
+            from env.mpe_scenario import reference_risk
             # env = simple_reference_v3.env(**special_config)
-            env = simple_reference_v3.parallel_env(**env_config)
+            env = reference_risk.parallel_env(**env_config)
             env.reset()
         else:
             raise NotImplementedError(f"Undefined MPE map <{map_name}>!")
@@ -208,7 +211,7 @@ def make_env(config):
                            'obs_space': env.observation_space(agent_0_id).shape[0],
                            'action_space': env.action_space(agent_0_id).n,
                            'state_space': env.state_space.shape[0],
-                           'scenario': env_name + '_' + map_name
+                           'mpe_scenario': env_name + '_' + map_name
                            }
         config.update(scenario_config)
 
@@ -239,29 +242,31 @@ def run_one_episode(seed, env, comm_agent, agent):
     n_agent = len(env.agents)
     dones = [False for _ in range(n_agent)]
     agent.reset_hidden_state(seq_len=1)
-    # raw_env 是 parallel_env 的一个属性
+    rewards = np.zeros((n_agent, 1))
+
     while env.agents:
         done = False if False in dones else True
         observations = np.array(list(observations.values()), dtype=np.float32)
 
-        obs_new, comm_reward = comm_agent.communication_round(observations, done) if communicate else (torch.from_numpy(
+        obs_new, comm_reward = comm_agent.communication_round(observations, rewards.copy(), done) if communicate else (
+        torch.from_numpy(
             observations).to(agent.device), None)
-
-        global comm_rewards
+        global batch_cache
         if comm_reward is not None:
             for c_r in comm_reward:
-                comm_rewards.append(comm_reward)
+                batch_cache['comm_rewards'].append(c_r)
 
         actions, warning_signals = agent.choose_actions(obs_new)
 
         observations, rewards, terminations, truncations, infos = env.step(
             {agent: action for agent, action in zip(env.agents, actions)})  # 传进去的需要是一个字典
+        danger_times = env.world.danger_infos()
 
         utilities = agent.compute_utility(rewards, warning_signals)
 
         dones = list(map(lambda x, y: x or y, terminations.values(), truncations.values()))
 
-        results.append([obs_new, actions, utilities, warning_signals, dones])
+        results.append([obs_new, actions, utilities, warning_signals, dones, danger_times])
 
     env.close()
 
@@ -271,10 +276,10 @@ def run_one_episode(seed, env, comm_agent, agent):
 def store_results(episode, agent, results):
     n_agent = agent.n_agent
     seq_len = len(results)
-    obs, actions, rewards, mus, dones = [], [], [], [], []
+    obs, actions, rewards, mus, dones, danger_times, agents_in_danger = [], [], [], [], [], [], []
     for result in results:
-        for elem, category, c_name in zip(result, [obs, actions, rewards, mus, dones],
-                                          ['obs', 'actions', 'rewards', 'mus', 'dones']):
+        for elem, category, c_name in zip(result, [obs, actions, rewards, mus, dones, danger_times],
+                                          ['obs', 'actions', 'rewards', 'mus', 'dones', 'danger_times']):
             if isinstance(elem, dict):
                 values = np.array(list(elem.values()))
             elif isinstance(elem, list):
@@ -295,6 +300,7 @@ def store_results(episode, agent, results):
     rewards = np.array(rewards).reshape(seq_len, n_agent, -1)
     mus = np.array(mus).reshape(seq_len, n_agent, -1)
     dones = np.array(dones).reshape(seq_len, n_agent, -1)
+    danger_times = np.array(danger_times).reshape(seq_len, -1)
 
     truncations = []
     for d in np.array(dones, dtype=np.int32).reshape(n_agent, seq_len):
@@ -325,10 +331,10 @@ def store_results(episode, agent, results):
         _save_to_mat()
 
     def _store_cache():
-        # comm
+        global exp_cache, batch_cache
         if this_batch_algo.find('c') != -1:
-            global end_comm_rewards
-            end_comm_rewards.update({this_batch_algo: comm_rewards})
+            global exp_cache
+            exp_cache['comm_rewards'].update({this_batch_algo: batch_cache['comm_rewards']})
 
         def _global_reward():
             all_rewards = np.sum(rewards.squeeze(), axis=0)
@@ -338,8 +344,7 @@ def store_results(episode, agent, results):
         rewards = rewards.reshape(n_agent, -1)
         global_reward = _global_reward()
 
-        global end_rewards
-        end_reward = end_rewards[this_batch_algo]
+        end_reward = exp_cache['rewards'][this_batch_algo]
 
         def _extract_end_reward():
             for i, r in enumerate(rewards):
@@ -356,22 +361,21 @@ def store_results(episode, agent, results):
 
     _store_cache()
     #
-    return obs, actions, rewards, n_obs, dones, states, n_states, mus
+    return obs, actions, rewards, n_obs, dones, states, n_states, mus, danger_times
 
 
 def train_agent(comm_agent, agent):
-    # comm_agent 每一个communication round都会进行train, 这里仅考虑GMIX的train过程
     autograd_detect = not save_this_batch
-    agent.train(autograd_detect)
+    loss = agent.train(autograd_detect)
+    batch_cache['loss'].extend(loss)
 
 
 def plot_results(episode, results, config):
     obs, actions, rewards, n_obs, dones, states, n_states, mus = results
 
-    end_reward = end_rewards[this_batch_algo]
     algo = this_batch_algo
 
-    n_agent = rewards.shape[1]
+    n_agent = rewards.shape[0]
     labels = [f'Agent{i}' for i in range(n_agent)] + ['Global']
 
     def _save_mode():
@@ -442,13 +446,13 @@ def plot_results(episode, results, config):
     def _losses():
         plt.figure()
         plt.xlabel('Timestep')
-        plt.ylabel('Losses')
+        plt.ylabel('Loss')
         plt.title(algo.upper() + ' Until episode ' + str(episode))
-        plt.plot(losses, color=random.choice(colors))
+        plt.plot(batch_cache['loss'], color=random.choice(colors))
         if save_this_batch:
-            plt.savefig(rootpath + batch_name + folder[1] + f'/losses.png')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/loss.png')
             if save_pdf:
-                plt.savefig(rootpath + batch_name + folder[1] + f'/losses.pdf')
+                plt.savefig(rootpath + batch_name + folder[1] + f'/loss.pdf')
         else:
             pass
             # if episode % (tot_episode // 10) == 0:
@@ -459,7 +463,7 @@ def plot_results(episode, results, config):
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Reward')
-        for end_r, label, color in zip(end_rewards[algo].values(), labels, colors):
+        for end_r, label, color in zip(exp_cache['rewards'][algo].values(), labels, colors):
             plt.plot(end_r, label=label, color=color)
         plt.legend()
         plt.tight_layout()
@@ -493,18 +497,18 @@ def plot_results(episode, results, config):
             # plt.show()
         plt.close()
 
-        global danger_zones
+        global exp_cache
         for label, danger in zip(labels, [mus[:, 0, :].sum(), mus[:, 1, :].sum(), mus_all.sum()]):
-            if label not in danger_zones[algo]:
-                danger_zones[algo][label] = deque(maxlen=int(1e4))
-            danger_zones[algo][label].append(danger)
+            if label not in exp_cache['dangers'][algo].keys():
+                exp_cache['dangers'][algo][label] = deque(maxlen=int(1e4))
+            exp_cache['dangers'][algo][label].append(danger)
 
     def _end_dangers():
         # times reaches the danger zone per episode
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Times reaches danger zones')
-        for danger, label, color in zip(danger_zones[algo].values(), labels, colors):
+        for danger, label, color in zip(exp_cache['dangers'][algo].values(), labels, colors):
             plt.plot(danger, label=label, color=color)
         plt.legend()
         plt.title(algo.upper())
@@ -524,7 +528,7 @@ def plot_results(episode, results, config):
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Communication Reward')
-        plt.plot(comm_rewards, color=random.choice(colors))
+        plt.plot(batch_cache['comm_rewards'], color=random.choice(colors))
         plt.title(algo.upper())
         plt.tight_layout()
         if save_this_batch:
@@ -540,7 +544,9 @@ def plot_results(episode, results, config):
     _rewards()
     _reward_in_one()
     _end_reward()
+
     _losses()
+
     _dangers()
     _end_dangers()
 
@@ -554,10 +560,10 @@ def exp_summary():
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Reward')
-        colors = plt.colormaps.get_cmap('Accent').colors
-        for algo, color in zip(end_rewards.keys(), colors):
-            last_rewards.update({algo: end_rewards[algo]['Global']})
-            plt.plot(end_rewards[algo]['Global'], label=algo, color=color, linewidth=1.5)
+        colors = plt.colormaps.get_cmap('tab10').colors
+        for algo, color in zip(exp_cache['rewards'].keys(), colors):
+            last_rewards.update({algo: exp_cache['rewards'][algo]['Global']})
+            plt.plot(exp_cache['rewards'][algo]['Global'], label=algo, color=color, linewidth=1.5)
         plt.legend()
         plt.tight_layout()
         if save_this_batch:
@@ -567,13 +573,9 @@ def exp_summary():
             plt.savefig(summary_path + f'/Reward.png')
             if save_pdf:
                 plt.savefig(summary_path + f'/Reward.pdf')
-            # store the mete data of this pic
             sio.savemat(summary_path + '/rewards.mat', last_rewards)
-
         else:
-            pass
-        # if episode % (tot_episode // 10) == 0:
-        #     plt.show()
+            plt.show()
         plt.close()
 
     def _danger_summary():
@@ -581,10 +583,10 @@ def exp_summary():
         colors = plt.colormaps.get_cmap('Set1').colors
         plt.figure()
         plt.xlabel('Episode')
-        plt.ylabel('Danger')
-        for algo, color in zip(danger_zones.keys(), colors):
-            all_dangers.update({algo: danger_zones[algo]['Global']})
-            plt.plot(danger_zones[algo]['Global'], label=algo, color=color, linewidth=1.5)
+        plt.ylabel('Times reach danger zones')
+        for algo, color in zip(exp_cache['dangers'].keys(), colors):
+            all_dangers.update({algo: exp_cache['dangers'][algo]['Global']})
+            plt.plot(exp_cache['dangers'][algo]['Global'], label=algo, color=color, linewidth=1.5)
         plt.legend()
         plt.tight_layout()
         if save_this_batch:
@@ -592,33 +594,30 @@ def exp_summary():
             plt.savefig(summary_path + f'/Danger.png')
             if save_pdf:
                 plt.savefig(summary_path + f'/Danger.pdf')
-            # store the mete data of this pic
             sio.savemat(summary_path + '/Danger.mat', all_dangers)
-
         else:
-            pass
-        # if episode % (tot_episode // 10) == 0:
-        #     plt.show()
+            plt.show()
         plt.close()
 
     def _comm_summary():
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Communication Reward')
-        plt.plot(comm_rewards, color=random.choice(colors))
-        plt.title(algo.upper())
+        colors = plt.colormaps.get_cmap('tab20').colors
+        for algo, color in zip(exp_cache['comm_rewards'].keys(), colors):
+            plt.plot(exp_cache['comm_rewards'][algo], label=algo, color=color, linewidth=1.5)
+        plt.legend()
         plt.tight_layout()
         if save_this_batch:
             summary_path = rootpath + exp_name + '/summary/'
             plt.savefig(summary_path + f'/CommReward.png')
             if save_pdf:
                 plt.savefig(summary_path + f'/CommReward.pdf')
+            sio.savemat(summary_path + '/Comm.mat', exp_cache['comm_rewards'])
         else:
-            pass
-            # if episode % (tot_episode // 10) == 0:
-            #     plt.show()
+            plt.show()
         plt.close()
 
     _reward_summary()
     _danger_summary()
-    # _comm_summary()
+    _comm_summary()

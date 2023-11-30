@@ -12,8 +12,6 @@ from model.mlp_nonnegative import MLP
 from model.sum_mixer import VDNMixer as GMixer
 from marl.ReplayBuffer import MAReplayBuffer
 
-losses = deque(maxlen=int(1e4))
-
 
 class QMIXAgent(object):
     def __init__(self, config):
@@ -87,6 +85,8 @@ class QMIXAgent(object):
         self.buffer = MAReplayBuffer(n_agent, self.config.get('buffer_size', 128))
 
     def train(self, autograd_detect=False):
+        losses = deque(maxlen=int(1e4))
+
         batch_size = min(self.config.get('batch_size', 32), self.buffer.len)
 
         obs, actions, rewards, n_obs, dones, states, n_states, mus = self.buffer.sample(batch_size, self.device)
@@ -167,11 +167,12 @@ class QMIXAgent(object):
             self.optimizer.zero_grad()
             with torch.autograd.set_detect_anomaly(autograd_detect):
                 loss.backward()
-            global losses
             losses.append(loss.detach().item())
             torch.nn.utils.clip_grad_norm_(self.params, max_norm=10, norm_type=2)
             self.optimizer.step()
             self.train_step += 1
+
+        return losses
 
     def update_target_model(self):
         assert self.target_model_update_cycle != 0, "target_model_update_cycle must be set!"
@@ -235,8 +236,8 @@ class QMIXAgent(object):
 
     def _generate_warning_signals(self, obs):
         # warning signal include external knowledge, should customize for different scenarios
-        scenario = self.config.get('scenario', None)
-        assert scenario is not None, "Undefined scenario!"
+        scenario = self.config.get('mpe_scenario', None)
+        assert scenario is not None, "Undefined mpe_scenario!"
         warning_signals = np.zeros((self.n_agent, 1), dtype=np.float32)
         if scenario == 'mpe_reference':
             # reference环境的风险来自于当前agent与其他agent的距离，与自己目标的距离
@@ -269,10 +270,9 @@ class QMIXAgent(object):
         utilities = o1 * rewards - o2 * warning_signals
         return utilities
 
-
     def load_model(self, scenario):
         logger = logging.getLogger()
-        logger.info(f"Load model from scenario {scenario}")
+        logger.info(f"Load model from mpe_scenario {scenario}")
         scenario = './chkpt/' + scenario
         self.model.load_state_dict(torch.load(scenario + '_' + self.name + '_model.pth'))
         self.target_model.load_state_dict(torch.load(scenario + '_' + self.name + '_target_model.pth'))
@@ -286,16 +286,16 @@ class QMIXAgent(object):
             now = datetime.now()
             timestamp = now.strftime("%Y_%m_%d_%H_%M_")
             timepath = now.strftime("%m.%d")
-            scenario = self.config.get('scenario', None)
-            assert scenario is not None, "Undefined scenario!"
+            scenario = self.config.get('mpe_scenario', None)
+            assert scenario is not None, "Undefined mpe_scenario!"
             torch.save(self.model.state_dict(),
-                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_model.pth")
+                       f"./chkpt/{timepath}/{timestamp + self.config['mpe_scenario'] + '_' + self.name}_model.pth")
             torch.save(self.target_model.state_dict(),
-                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_target_model.pth")
+                       f"./chkpt/{timepath}/{timestamp + self.config['mpe_scenario'] + '_' + self.name}_target_model.pth")
             torch.save(self.mixer.state_dict(),
-                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_mixer.pth")
+                       f"./chkpt/{timepath}/{timestamp + self.config['mpe_scenario'] + '_' + self.name}_mixer.pth")
             torch.save(self.target_mixer.state_dict(),
-                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_target_mixer.pth")
+                       f"./chkpt/{timepath}/{timestamp + self.config['mpe_scenario'] + '_' + self.name}_target_mixer.pth")
 
     def reset_hidden_state(self, batch_size=1, seq_len=100):
         # hidden state 是网络需要的，和输入的维度关系不大

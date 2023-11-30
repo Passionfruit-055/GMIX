@@ -84,12 +84,12 @@ class CommAgent(object):
         self.target_model.load_state_dict(self.model.state_dict())
         self.params.extend(list(self.model.parameters()))
 
-    def communication_round(self, obs, done=False, params=None):
-        # add here to provide a protection
+    def communication_round(self, obs, task_rewards, done=False, params=None):
         if done:
             logger = logging.getLogger()
             logger.error("last timestep, should not be stored!")
             return
+
 
         pos = self._extract_agent_pos(obs)
 
@@ -101,13 +101,12 @@ class CommAgent(object):
         if self.states is not None:
             for s, a, r, ns in zip(self.states, self.modes, self.rewards, states):
                 self.memory.add(s, a, r, ns)
-            # self.memory.add(self.states, self.modes, self.rewards, states)
 
         self.states = states
 
         self.choose_comm_modes(states)
 
-        self.compute_reward()
+        self.compute_reward(task_rewards)
 
         obs_new = self.modify_obs(obs, self.prepare_message(obs, params))
 
@@ -149,7 +148,7 @@ class CommAgent(object):
         return states
 
     def _extract_agent_pos(self, obs):
-        scenario = self.config.get('scenario', 'mpe_reference')
+        scenario = self.config.get('mpe_scenario', 'mpe_reference')
         if scenario == 'mpe_reference':
             pos = obs[:, :2]
         else:
@@ -288,12 +287,17 @@ class CommAgent(object):
         _abstract_data()
         return msgs
 
-    def compute_reward(self):
+    def compute_reward(self, task_rewards):
+        if isinstance(task_rewards, dict):
+            task_rewards = np.array(list(task_rewards.values()))
+
+        task_rewards = np.array(task_rewards, dtype=np.float32).reshape((self.n_agent, ))
+
         # encourage to communicate, AoI to give negative feedback
         o1 = 1
         o2 = 0.8
         AoI = np.mean(self.AoI_history, axis=1)
-        rewards = o1 * self.rewards - o2 * AoI
+        rewards = o1 * task_rewards - o2 * AoI
         self.rewards = rewards
 
     def _compute_overhead(self, dist, queue_delay):
@@ -363,7 +367,7 @@ class CommAgent(object):
 
     def load_model(self, scenario):
         logger = logging.getLogger()
-        logger.info(f"Load model from scenario {scenario}")
+        logger.info(f"Load model from mpe_scenario {scenario}")
         scenario = './chkpt/' + scenario
         self.model.load_state_dict(torch.load(scenario + '_' + self.name + '.pth'))
         self.target_model.load_state_dict(torch.load(scenario + '_' + self.name + '_target.pth'))
@@ -375,12 +379,12 @@ class CommAgent(object):
             now = datetime.now()
             timestamp = now.strftime("%Y_%m_%d_%H_%M_")
             timepath = now.strftime("%m.%d")
-            scenario = self.config.get('scenario', None)
-            assert scenario is not None, "Undefined scenario!"
+            scenario = self.config.get('mpe_scenario', None)
+            assert scenario is not None, "Undefined mpe_scenario!"
             torch.save(self.model.state_dict(),
-                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}.pth")
+                       f"./chkpt/{timepath}/{timestamp + self.config['mpe_scenario'] + '_' + self.name}.pth")
             torch.save(self.target_model.state_dict(),
-                       f"./chkpt/{timepath}/{timestamp + self.config['scenario'] + '_' + self.name}_target.pth")
+                       f"./chkpt/{timepath}/{timestamp + self.config['mpe_scenario'] + '_' + self.name}_target.pth")
 
 
 if __name__ == '__main__':

@@ -4,7 +4,7 @@ experiment:
     custom_file_handler_path: False
     file_handler_path: ''
   running:
-    seed: 1122
+    seed: 112
     episode: 5
     timestep: 1000  # max_timestep, goto env param to set specific length
     buffer_size: 128
@@ -42,6 +42,7 @@ env:
   seed: 0
   communicate: True
   msg_len: 10
+  render_mode: 'human' # None  'human'  'rgb_array'
 
 plot:
   cmap: 'Set2'

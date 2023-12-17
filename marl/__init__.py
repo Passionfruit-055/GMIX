@@ -1,5 +1,8 @@
 import logging
 import warnings
+from copy import deepcopy
+
+import imageio
 import numpy as np
 from datetime import datetime
 import random
@@ -7,13 +10,14 @@ import os
 import scipy.io as sio
 import torch
 from collections import deque
+import pygame
 
-from .mylogger import init_logger
+from marl.mylogger import init_logger
 from algo.qmix import QMIXAgent
 from algo.comm import CommAgent
 from env import config_env
 import matplotlib.pyplot as plt
-from .cache import Cache
+from marl.Cache import Cache
 
 now = datetime.now()
 today = now.strftime("%m.%d")
@@ -21,7 +25,7 @@ current_time = now.strftime("%H_%M")
 rootpath = './results/' + today + '/'
 if not os.path.exists(rootpath):
     os.makedirs(rootpath)
-folder = ['/' + f + '/' for f in ['data', 'fig', 'replay', 'tensorboard']]
+folder = ['/' + f + '/' for f in ['data', 'fig', 'replay']] # , 'tensorboard']]
 
 save_this_batch = True
 save_pdf = True
@@ -50,8 +54,10 @@ exp_cache['dangers'] = {}
 exp_cache['comm_rewards'] = {}
 
 batch_cache = Cache('store results of different episodes')
-batch_cache['comm_rewards'] = deque(maxlen=int(1e4))
+batch_cache['comm_rewards'] = deque(maxlen=int(1e4))  # length : timesteps for one episode
 batch_cache['loss'] = deque(maxlen=int(1e4))
+
+screen_cache = []
 
 
 def _count_folders(path):
@@ -245,6 +251,10 @@ def run_one_episode(seed, env, comm_agent, agent):
     rewards = np.zeros((n_agent, 1))
 
     while env.agents:
+        # save screen
+        global screen_cache
+        screen_cache.append(pygame.image.tobytes(env.unwrapped.screen, 'RGB'))
+
         done = False if False in dones else True
         observations = np.array(list(observations.values()), dtype=np.float32)
 
@@ -259,6 +269,7 @@ def run_one_episode(seed, env, comm_agent, agent):
 
         observations, rewards, terminations, truncations, infos = env.step(
             {agent: action for agent, action in zip(env.agents, actions)})  # 传进去的需要是一个字典
+
         danger_times = env.unwrapped.world.danger_infos()
 
         utilities = agent.compute_utility(rewards, warning_signals)
@@ -266,7 +277,9 @@ def run_one_episode(seed, env, comm_agent, agent):
 
         results.append([obs_new, actions, utilities, warning_signals, dones, danger_times])
 
-    env.close()
+
+    # 如果在这里 close env，会将 pygame 一起关闭，所以将 close 转化为 reset
+    # env.close()
 
     return results  # return a whole episode
 
@@ -298,7 +311,7 @@ def store_results(episode, agent, results):
     rewards = np.array(rewards).reshape(seq_len, n_agent, -1)
     mus = np.array(mus).reshape(seq_len, n_agent, -1)
     dones = np.array(dones).reshape(seq_len, n_agent, -1)
-    danger_times = np.array(danger_times).reshape(seq_len, -1)
+    danger_times = np.array(danger_times).reshape(seq_len, n_agent, -1)
 
     truncations = []
     for d in np.array(dones, dtype=np.int32).reshape(n_agent, seq_len):
@@ -316,15 +329,6 @@ def store_results(episode, agent, results):
     agent.store_experience(obs, actions, rewards, n_obs, dones, states, n_states, mus)
 
     def _save_to_mat():
-        filenames = ['rewards.mat', 'actions.mat', 'mus.mat', 'dones.mat', 'danger_times.mat']
-        for filename, category in zip(filenames, [rewards, actions, mus, dones, danger_times]):
-            if not os.path.exists(rootpath + batch_name + folder[0] + filename):
-                sio.savemat(rootpath + batch_name + folder[0] + filename, {f'episode{episode}': category})
-            else:
-                history = sio.loadmat(rootpath + batch_name + folder[0] + filename)
-                history.update({f'episode{episode}': category})
-                sio.savemat(rootpath + batch_name + folder[0] + filename, history)
-
         keys = ['rewards', 'actions', 'mus', 'dones', 'danger_times']
         if not os.path.exists(rootpath + batch_name + folder[0] + '/results.mat'):
             episode_result = {key: [value] for key, value in zip(keys, [rewards, actions, mus, dones, danger_times])}
@@ -332,17 +336,42 @@ def store_results(episode, agent, results):
         else:
             history = sio.loadmat(rootpath + batch_name + folder[0] + '/results.mat')
             for key, value in zip(keys, [rewards, actions, mus, dones, danger_times]):
+                history[key] = list(history[key])
                 history[key].append(value)
             sio.savemat(rootpath + batch_name + folder[0] + '/results.mat', history)
 
+    def _save_frames_2_gif():
+        global screen_cache
+        # save frames to jpeg
+        for i, screen in enumerate(screen_cache):
+            surface = pygame.image.frombytes(screen, (700, 700), 'RGB')
+            pygame.image.save(surface, rootpath + batch_name + folder[2] + "Frame" + str(i) + ".jpg")
+        screen_cache.clear()
+
+        def _create_gif():
+            frames = []
+            for image_name in rootpath + batch_name + folder[2]:
+                if image_name.find('.jpg') != -1:
+                    frames.append(imageio.v2.imread(image_name))
+            imageio.mimsave(rootpath + batch_name + folder[2] + f'episode{episode}.gif' , frames, 'GIF', duration=0.35)
+        _create_gif()
+
     if save_this_batch:
         _save_to_mat()
+        if len(screen_cache) > 0:
+            _save_frames_2_gif()
 
     def _store_cache():
         global exp_cache, batch_cache
+
+        # 一个 episode 的累积 comm reward
         if this_batch_algo.find('c') != -1:
             global exp_cache
-            exp_cache['comm_rewards'].update({this_batch_algo: batch_cache['comm_rewards']})
+            if this_batch_algo not in exp_cache['comm_rewards'].keys():
+                exp_cache['comm_rewards'].update({this_batch_algo: deque(maxlen=int(1e4))})
+            this_episode_comm_reward = np.sum(batch_cache['comm_rewards'])
+            exp_cache['comm_rewards'][this_batch_algo].append(this_episode_comm_reward)
+            batch_cache['comm_rewards'].clear()
 
         def _global_reward():
             all_rewards = np.sum(rewards.squeeze(), axis=0)
@@ -368,7 +397,7 @@ def store_results(episode, agent, results):
         _extract_end_reward()
 
     _store_cache()
-    #
+
     return obs, actions, rewards, n_obs, dones, states, n_states, mus, danger_times
 
 
@@ -379,7 +408,7 @@ def train_agent(comm_agent, agent):
 
 
 def plot_results(episode, results, config):
-    obs, actions, rewards, n_obs, dones, states, n_states, mus = results
+    obs, actions, rewards, n_obs, dones, states, n_states, mus, danger_times = results
 
     algo = this_batch_algo
 
@@ -389,7 +418,7 @@ def plot_results(episode, results, config):
     def _save_mode():
         keep_live = config.get('keep_live', True)
         if keep_live:
-            live_path = rootpath + batch_name + folder[1] + '/live/'
+            live_path = rootpath + batch_name + folder[1] + '/episode/'
             if not os.path.exists(live_path):
                 os.mkdir(live_path)
         save_recent_n_episode = config.get('save_recent_n_episode', 32)
@@ -425,9 +454,9 @@ def plot_results(episode, results, config):
         fig.suptitle(algo.upper() + ' Episode ' + str(episode))
         plt.tight_layout()
         if save_this_batch:
-            plt.savefig(rootpath + batch_name + folder[1] + f'/live/rewards_{episode % recent_num}.png')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/episode/rewards_{episode % recent_num}.png')
             if save_pdf:
-                plt.savefig(rootpath + batch_name + folder[1] + f'/live/rewards_{episode % recent_num}.pdf')
+                plt.savefig(rootpath + batch_name + folder[1] + f'/episode/rewards_{episode % recent_num}.pdf')
         else:
             pass
             # plt.show()
@@ -443,9 +472,9 @@ def plot_results(episode, results, config):
         plt.title(algo.upper() + ' Episode ' + str(episode))
         plt.tight_layout()
         if save_this_batch:
-            plt.savefig(rootpath + batch_name + folder[1] + f'/live/rewards_{episode % recent_num}_in_one.png')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/episode/rewards_{episode % recent_num}_in_one.png')
             if save_pdf:
-                plt.savefig(rootpath + batch_name + folder[1] + f'/live/rewards_{episode % recent_num}_in_one.pdf')
+                plt.savefig(rootpath + batch_name + folder[1] + f'/episode/rewards_{episode % recent_num}_in_one.pdf')
         else:
             pass
             # plt.show()
@@ -486,10 +515,10 @@ def plot_results(episode, results, config):
             #     plt.show()
         plt.close()
 
-    def _dangers():
-        mus_all = np.sum(mus, axis=1)
+    def _dangers_episode():
+        danger_times_all = np.sum(danger_times, axis=1)
         fig, axes = plt.subplots(1, n_agent + 1, figsize=((n_agent + 1) * 6 + 2, 6))
-        for ax, label, danger, color in zip(axes, labels, [mus[0], mus[1], mus_all], colors):
+        for ax, label, danger, color in zip(axes, labels, [danger_times[0], danger_times[1], danger_times_all], colors):
             ax.plot(danger, color=color, label=label)
             ax.set_xlabel('Timestep')
             ax.set_ylabel('Dangers')
@@ -497,21 +526,22 @@ def plot_results(episode, results, config):
         fig.suptitle(algo + ' Episode ' + str(episode))
         plt.tight_layout()
         if save_this_batch:
-            plt.savefig(rootpath + batch_name + folder[1] + f'/live/dangers_{episode % recent_num}.png')
+            plt.savefig(rootpath + batch_name + folder[1] + f'/episode/dangers_{episode % recent_num}.png')
             if save_pdf:
-                plt.savefig(rootpath + batch_name + folder[1] + f'/live/dangers_{episode % recent_num}.pdf')
+                plt.savefig(rootpath + batch_name + folder[1] + f'/episode/dangers_{episode % recent_num}.pdf')
         else:
             pass
             # plt.show()
         plt.close()
 
         global exp_cache
-        for label, danger in zip(labels, [mus[:, 0, :].sum(), mus[:, 1, :].sum(), mus_all.sum()]):
+        for label, danger in zip(labels,
+                                 [danger_times[:, 0, :].sum(), danger_times[:, 1, :].sum(), danger_times_all.sum()]):
             if label not in exp_cache['dangers'][algo].keys():
                 exp_cache['dangers'][algo][label] = deque(maxlen=int(1e4))
             exp_cache['dangers'][algo][label].append(danger)
 
-    def _end_dangers():
+    def _dangers_batch():
         # times reaches the danger zone per episode
         plt.figure()
         plt.xlabel('Episode')
@@ -532,11 +562,11 @@ def plot_results(episode, results, config):
         plt.close()
 
     def _comm_reward():
-        # 因为没有一个 end 的情况，整体的 batch 可看做是一个连续的训练过程，所以把整体的 comm reward 画在一张图里
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Communication Reward')
-        plt.plot(batch_cache['comm_rewards'], color=random.choice(colors))
+        # plt.plot(batch_cache['comm_rewards'], color=random.choice(colors))
+        plt.plot(exp_cache['comm_rewards'][algo], color=random.choice(colors))
         plt.title(algo.upper())
         plt.tight_layout()
         if save_this_batch:
@@ -555,15 +585,15 @@ def plot_results(episode, results, config):
 
     _losses()
 
-    _dangers()
-    _end_dangers()
+    _dangers_episode()
+    _dangers_batch()
 
     if algo.find('c') != -1:
         _comm_reward()
 
 
 def exp_summary():
-    def _reward_summary():
+    def _reward():
         last_rewards = {}
         plt.figure()
         plt.xlabel('Episode')
@@ -586,7 +616,7 @@ def exp_summary():
             plt.show()
         plt.close()
 
-    def _danger_summary():
+    def _danger():
         all_dangers = {}
         colors = plt.colormaps.get_cmap('Set1').colors
         plt.figure()
@@ -602,16 +632,17 @@ def exp_summary():
             plt.savefig(summary_path + f'/Danger.png')
             if save_pdf:
                 plt.savefig(summary_path + f'/Danger.pdf')
+
             sio.savemat(summary_path + '/Danger.mat', all_dangers)
         else:
             plt.show()
         plt.close()
 
-    def _comm_summary():
+    def _comm():
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Communication Reward')
-        colors = plt.colormaps.get_cmap('tab20').colors
+        colors = plt.colormaps.get_cmap('tab10').colors
         for algo, color in zip(exp_cache['comm_rewards'].keys(), colors):
             plt.plot(exp_cache['comm_rewards'][algo], label=algo, color=color, linewidth=1.5)
         plt.legend()
@@ -626,6 +657,13 @@ def exp_summary():
             plt.show()
         plt.close()
 
-    _reward_summary()
-    _danger_summary()
-    _comm_summary()
+    _reward()
+    _danger()
+    _comm()
+
+
+if __name__ == '__main__':
+    from scipy.io import loadmat
+
+    history = loadmat("D:/Master/Paper&Project/GMIX/results/12.01/4_MPEreference_newsave/c-gmix/data/results.mat")
+    print(type(history))

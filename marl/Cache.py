@@ -12,5 +12,8 @@ class Cache:
     def __getitem__(self, item):  # 获取函数
         return self.cache[item]
 
-    def __delitem__(self, key):  # 删除函数
-        del self.cache[key]
+    def __delitem__(self, key=None):  # 删除函数
+        if key is not None:
+            del self.cache[key]
+        else:
+            self.cache = {}

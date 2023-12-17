@@ -13,7 +13,7 @@ config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 
 
 if __name__ == '__main__':
-    info = 'test change batch save'  # inject 'test' to open the debug mode
+    info = 'replay'  # add 'test' to open the debug mode
 
     total_batch, seed, episode, seq_len, logger = running_config(config, info)
 
@@ -32,6 +32,8 @@ if __name__ == '__main__':
             plot_results(e, results, config['plot'])
             # if e > 0:
             train_agent(CommAgent, TaskAgent)
+
+
 
         # except Exception as e:
         #     logger.error(e)

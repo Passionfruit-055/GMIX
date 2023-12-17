@@ -9,7 +9,7 @@ class DangerPoint(Entity):
         self.size = 0.05
         self.collide = False
         self.movable = False
-        self.color = np.array([128, 0, 0])  # maroon
+        self.color = np.array([84, 30, 36]) / 200
         self.state = EntityState()
         self.state.p_pos = np.zeros(2)
 
@@ -18,10 +18,10 @@ class DangerZone(Entity):
     def __init__(self, source_point: DangerPoint):
         super().__init__()
         self.name = "DangerZone"
-        self.size = 0.15
+        self.size = 0.18
         self.collide = False
         self.movable = False
-        self.color = np.array([256, 0, 0])  # red
+        self.color = np.array([244, 206, 105]) / 200  # /200 to match original setting, compatible with old pyglet
         self.state = EntityState()
         self.source_point = source_point
         self.state.p_pos = source_point.state.p_pos

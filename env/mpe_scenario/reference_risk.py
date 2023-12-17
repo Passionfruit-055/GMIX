@@ -1,7 +1,7 @@
 import numpy as np
 from gymnasium.utils import EzPickle
 
-from pettingzoo.mpe._mpe_utils.core import Agent, Landmark, World
+from pettingzoo.mpe._mpe_utils.core import Agent, Landmark
 from pettingzoo.mpe._mpe_utils.scenario import BaseScenario
 from pettingzoo.mpe._mpe_utils.simple_env import SimpleEnv, make_env
 from pettingzoo.utils.conversions import parallel_wrapper_fn
@@ -13,7 +13,7 @@ __all__ = ["env", "parallel_env", "raw_env"]
 
 class raw_env(SimpleEnv, EzPickle):
     def __init__(
-        self, local_ratio=0.5, max_cycles=25, continuous_actions=False, render_mode=None
+            self, local_ratio=0.5, max_cycles=25, continuous_actions=False, render_mode=None
     ):
         EzPickle.__init__(
             self,
@@ -23,7 +23,7 @@ class raw_env(SimpleEnv, EzPickle):
             render_mode=render_mode,
         )
         assert (
-            0.0 <= local_ratio <= 1.0
+                0.0 <= local_ratio <= 1.0
         ), "local_ratio is a proportion. Must be between 0 and 1."
         scenario = Scenario()
         world = scenario.make_world()
@@ -36,7 +36,7 @@ class raw_env(SimpleEnv, EzPickle):
             continuous_actions=continuous_actions,
             local_ratio=local_ratio,
         )
-        self.metadata["name"] = "simple_reference_v3"
+        self.metadata["name"] = "simple_reference_risk_v1"
 
 
 env = make_env(raw_env)
@@ -66,7 +66,6 @@ class Scenario(BaseScenario):
             danger_point.name = "danger_point %d" % i
             danger_point.collide = False
             danger_point.movable = False
-
         # add danger zones
         world.danger_zones = [DangerZone(dp) for dp in world.danger_points]
         for i, danger_zone in enumerate(world.danger_zones):
@@ -88,25 +87,34 @@ class Scenario(BaseScenario):
         world.agents[1].goal_b = np_random.choice(world.landmarks)
         # random properties for agents
         for i, agent in enumerate(world.agents):
-            agent.color = np.array([0.25, 0.25, 0.25])
+            # agent.color = np.array([0.25, 0.25, 0.25])
+            agent.color = np.array([139, 38, 113]) / 200
         # random properties for landmarks
-        world.landmarks[0].color = np.array([0.75, 0.25, 0.25])
-        world.landmarks[1].color = np.array([0.25, 0.75, 0.25])
-        world.landmarks[2].color = np.array([0.25, 0.25, 0.75])
-        # special colors for goals
-        world.agents[0].goal_a.color = world.agents[0].goal_b.color
-        world.agents[1].goal_a.color = world.agents[1].goal_b.color
-        # set random initial states
-        for agent in world.agents:
-            agent.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
+        world.landmarks[0].color = np.array([23, 129, 181]) / 200
+        world.landmarks[1].color = np.array([34, 148, 83]) / 200
+        world.landmarks[2].color = np.array([238, 63, 77]) / 200
+
+        # # special colors for goals
+        # world.agents[0].goal_a.color = world.agents[0].goal_b.color
+        # world.agents[1].goal_a.color = world.agents[1].goal_b.color
+
+        # set fixed initial states
+        starting_point = [np.array((-0.25, 0.25)), np.array((-0.25, -0.25))]
+        for agent, s_p in zip(world.agents, starting_point):
+            # agent.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
+            agent.state.p_pos = s_p
             agent.state.p_vel = np.zeros(world.dim_p)
             agent.state.c = np.zeros(world.dim_c)
-        for i, landmark in enumerate(world.landmarks):
-            landmark.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
+        landmarks = [np.array((0.7, 0.3)), np.array((0.8, -0.5)), np.array((0.95, -0.1))]
+        for i, (landmark, lm) in enumerate(zip(world.landmarks, landmarks)):
+            # landmark.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
+            landmark.state.p_pos = lm
             landmark.state.p_vel = np.zeros(world.dim_p)
+        danger_points = [np.array((0, 0.90)), np.array((0, -0.90))]
+        for i, (danger_point, d_p) in enumerate(zip(world.danger_points, danger_points)):
+            # danger_point.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
+            danger_point.state.p_pos = d_p
 
-        for i, danger_point in enumerate(world.danger_points):
-            danger_point.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
         for dp, dz in zip(world.danger_points, world.danger_zones):
             dz.state.p_pos = dp.state.p_pos
             dz.agent_in_zone = []

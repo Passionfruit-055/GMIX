@@ -99,21 +99,15 @@ class Scenario(BaseScenario):
         # world.agents[1].goal_a.color = world.agents[1].goal_b.color
 
         # set fixed initial states
-        starting_point = [np.array((-0.25, 0.25)), np.array((-0.25, -0.25))]
-        for agent, s_p in zip(world.agents, starting_point):
-            # agent.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
-            agent.state.p_pos = s_p
+        for agent in world.agents:
+            agent.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
             agent.state.p_vel = np.zeros(world.dim_p)
             agent.state.c = np.zeros(world.dim_c)
-        landmarks = [np.array((0.7, 0.3)), np.array((0.8, -0.5)), np.array((0.95, -0.1))]
-        for i, (landmark, lm) in enumerate(zip(world.landmarks, landmarks)):
-            # landmark.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
-            landmark.state.p_pos = lm
+        for i, landmark in enumerate(world.landmarks):
+            landmark.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
             landmark.state.p_vel = np.zeros(world.dim_p)
-        danger_points = [np.array((0, 0.90)), np.array((0, -0.90))]
-        for i, (danger_point, d_p) in enumerate(zip(world.danger_points, danger_points)):
-            # danger_point.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
-            danger_point.state.p_pos = d_p
+        for i, danger_point in enumerate(world.danger_points):
+            danger_point.state.p_pos = np_random.uniform(-1, +1, world.dim_p)
 
         for dp, dz in zip(world.danger_points, world.danger_zones):
             dz.state.p_pos = dp.state.p_pos

@@ -13,7 +13,7 @@ config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 
 
 if __name__ == '__main__':
-    info = 'replay'  # add 'test' to open the debug mode
+    info = 'average_reward'  # add 'test' to open the debug mode
 
     total_batch, seed, episode, seq_len, logger = running_config(config, info)
 

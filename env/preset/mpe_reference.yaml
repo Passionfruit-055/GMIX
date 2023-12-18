@@ -1,4 +1,4 @@
 local_ratio: 0.5
 max_cycles: 25
 continuous_actions: False
-render_mode: 'human'  # None  'human'  'rgb_array'
+render_mode: None  # None  'human'  'rgb_array'

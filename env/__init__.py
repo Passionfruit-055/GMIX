@@ -5,7 +5,7 @@ import yaml
 
 MODES = ['preset', 'test', 'finetuned']
 ENV_REGISTRY = ['mpe', 'smac']
-MAP_REGISTRY = {'mpe': ['reference', ],
+MAP_REGISTRY = {'mpe': ['reference', 'risk_ref', 'tag'],
                 'smac': ['3m', '8m', ]}
 
 

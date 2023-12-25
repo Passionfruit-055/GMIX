@@ -1,6 +1,5 @@
 import logging
 import warnings
-from copy import deepcopy
 
 import imageio
 import numpy as np
@@ -11,6 +10,7 @@ import scipy.io as sio
 import torch
 from collections import deque
 import pygame
+import csv
 
 from marl.mylogger import init_logger
 from algo.qmix import QMIXAgent
@@ -25,7 +25,7 @@ current_time = now.strftime("%H_%M")
 rootpath = './results/' + today + '/'
 if not os.path.exists(rootpath):
     os.makedirs(rootpath)
-folder = ['/' + f + '/' for f in ['data', 'fig', 'replay']] # , 'tensorboard']]
+folder = ['/' + f + '/' for f in ['data', 'fig', 'replay']]  # , 'tensorboard']]
 
 save_this_batch = True
 save_pdf = True
@@ -112,7 +112,7 @@ def running_config(config, info):
             os.makedirs(rootpath + exp_name)
 
     global tot_episode, seq_len
-    tot_episode = config['experiment']['running'].get('episode', 1000)
+    tot_episode = int(config['experiment']['running'].get('episode', 1000))
     seq_len = config['experiment']['running'].get('timestep', 100)
 
     global exp_cache
@@ -126,8 +126,8 @@ def one_batch_basic_preparation(config, env):
 
     global this_batch_algo
     this_batch = str(next(batch_supervisor))
-    this_batch_algo = this_batch
     logger.info(f"This batch is for {this_batch}")
+    this_batch_algo = this_batch
 
     def _cache():
         global batch_cache
@@ -158,19 +158,10 @@ def one_batch_basic_preparation(config, env):
     global batch_name
     batch_name = exp_name + '/' + str(this_batch) + '/'
 
-    def _launch_tensorboard():
-        from torch.utils.tensorboard import SummaryWriter
-        global tensorboard_writer
-        tensorboard_writer = SummaryWriter(rootpath + batch_name + folder[3])
-        os.system(f"tensorboard --logdir={rootpath + batch_name + folder[3]}")
-
     if save_this_batch:
-        # create result folder for this batch
         for f in folder:
             if not os.path.exists(rootpath + batch_name + f):
                 os.makedirs(rootpath + batch_name + f)
-
-        # _launch_tensorboard()
 
 
 def get_config(config, key, default, warning=None):
@@ -203,11 +194,17 @@ def make_env(config):
     env_config = config_env(mode=config.get('param', 'preset'), env=env_name, map=map_name)
 
     if env_name == 'mpe':
-        if map_name.find('reference') != -1:
-            # from pettingzoo.mpe import simple_reference_v3
+        if map_name.find('risk_ref') != -1:
             from env.mpe_scenario import reference_risk
-            # env = simple_reference_v3.env(**special_config)
             env = reference_risk.parallel_env(**env_config)
+            env.reset()
+        elif map_name.find('reference') != -1:
+            from pettingzoo.mpe import simple_reference_v3
+            env = simple_reference_v3.parallel_env(**env_config)
+            env.reset()
+        elif map_name.find('tag') != -1:
+            from pettingzoo.mpe import simple_tag_v3
+            env = simple_tag_v3.parallel_env(**env_config)
             env.reset()
         else:
             raise NotImplementedError(f"Undefined MPE map <{map_name}>!")
@@ -252,8 +249,8 @@ def run_one_episode(seed, env, comm_agent, agent):
 
     while env.agents:
         # save screen
-        global screen_cache
-        screen_cache.append(pygame.image.tobytes(env.unwrapped.screen, 'RGB'))
+        # global screen_cache
+        # screen_cache.append(pygame.image.tobytes(env.unwrapped.screen, 'RGB'))
 
         done = False if False in dones else True
         observations = np.array(list(observations.values()), dtype=np.float32)
@@ -270,13 +267,13 @@ def run_one_episode(seed, env, comm_agent, agent):
         observations, rewards, terminations, truncations, infos = env.step(
             {agent: action for agent, action in zip(env.agents, actions)})  # 传进去的需要是一个字典
 
-        danger_times = env.unwrapped.world.danger_infos()
+        danger_times = env.unwrapped.world.danger_infos() if env.metadata["name"].find('risk') != -1 else None
 
-        utilities = agent.compute_utility(rewards, warning_signals)
+        # utilities = agent.compute_utility(rewards, warning_signals)
         dones = list(map(lambda x, y: x or y, terminations.values(), truncations.values()))
 
-        results.append([obs_new, actions, utilities, warning_signals, dones, danger_times])
-
+        # results.append([obs_new, actions, utilities, warning_signals, dones, danger_times])
+        results.append([obs_new, actions, rewards, warning_signals, dones, danger_times])
 
     # 如果在这里 close env，会将 pygame 一起关闭，所以将 close 转化为 reset
     # env.close()
@@ -284,7 +281,7 @@ def run_one_episode(seed, env, comm_agent, agent):
     return results  # return a whole episode
 
 
-def store_results(episode, agent, results):
+def store_results(episode, agent, results, env):
     n_agent = agent.n_agent
     seq_len = len(results)
     obs, actions, rewards, mus, dones, danger_times, agents_in_danger = [], [], [], [], [], [], []
@@ -311,7 +308,9 @@ def store_results(episode, agent, results):
     rewards = np.array(rewards).reshape(seq_len, n_agent, -1)
     mus = np.array(mus).reshape(seq_len, n_agent, -1)
     dones = np.array(dones).reshape(seq_len, n_agent, -1)
-    danger_times = np.array(danger_times).reshape(seq_len, n_agent, -1)
+
+    if danger_times[0] is not None:
+        danger_times = np.array(danger_times).reshape(seq_len, n_agent, -1)
 
     truncations = []
     for d in np.array(dones, dtype=np.int32).reshape(n_agent, seq_len):
@@ -329,7 +328,10 @@ def store_results(episode, agent, results):
     agent.store_experience(obs, actions, rewards, n_obs, dones, states, n_states, mus)
 
     def _save_to_mat():
-        keys = ['rewards', 'actions', 'mus', 'dones', 'danger_times']
+        if env.metadata['name'].find('risk') != -1:
+            keys = ['rewards', 'actions', 'mus', 'dones', 'danger_times']
+        else:
+            keys = ['rewards', 'actions', 'mus', 'dones']
         if not os.path.exists(rootpath + batch_name + folder[0] + '/results.mat'):
             episode_result = {key: [value] for key, value in zip(keys, [rewards, actions, mus, dones, danger_times])}
             sio.savemat(rootpath + batch_name + folder[0] + '/results.mat', episode_result)
@@ -353,13 +355,9 @@ def store_results(episode, agent, results):
             for image_name in rootpath + batch_name + folder[2]:
                 if image_name.find('.jpg') != -1:
                     frames.append(imageio.v2.imread(image_name))
-            imageio.mimsave(rootpath + batch_name + folder[2] + f'episode{episode}.gif' , frames, 'GIF', duration=0.35)
-        _create_gif()
+            imageio.mimsave(rootpath + batch_name + folder[2] + f'episode{episode}.gif', frames, 'GIF', duration=0.35)
 
-    if save_this_batch:
-        _save_to_mat()
-        if len(screen_cache) > 0:
-            _save_frames_2_gif()
+        _create_gif()
 
     def _store_cache():
         global exp_cache, batch_cache
@@ -373,28 +371,44 @@ def store_results(episode, agent, results):
             exp_cache['comm_rewards'][this_batch_algo].append(this_episode_comm_reward)
             batch_cache['comm_rewards'].clear()
 
+        nonlocal rewards
+        rewards = rewards.reshape(n_agent, -1)
+
         def _global_reward():
             all_rewards = np.sum(rewards.squeeze(), axis=0)
             return all_rewards / n_agent
 
-        nonlocal rewards
-        rewards = rewards.reshape(n_agent, -1)
         global_reward = _global_reward()
 
-        end_reward = exp_cache['rewards'][this_batch_algo]
+        rewards = np.insert(rewards, n_agent, global_reward, axis=0)
 
-        def _extract_end_reward():
-            for i, r in enumerate(rewards):
-                if len(end_reward) < i + 1:
-                    end_reward.update({f'Agent{i}': [r[-1]]})
-                else:
-                    end_reward[f'Agent{i}'].append(r[-1])
-            if len(end_reward) < n_agent + 1:
-                end_reward.update({'Global': [global_reward[-1]]})
-            else:
-                end_reward['Global'].append(global_reward[-1])
+        def write_csv():
+            with open(rootpath + batch_name + folder[0] + f'/{this_batch_algo}_rewards.csv', 'a') as f:
+                writer = csv.writer(f)
+                if episode == 0:
+                    csv_header = [f'Agent{i}' for i in range(n_agent)] + ['Global']
+                    writer.writerow(csv_header)
+                episode_end_reward = [r[-1] for r in rewards]
+                writer.writerow(episode_end_reward)
 
-        _extract_end_reward()
+        if save_this_batch:
+            # _save_to_mat()
+            # if len(screen_cache) > 0:
+            #     _save_frames_2_gif()
+            write_csv()
+
+        # end_reward = exp_cache['rewards'][this_batch_algo]
+        # def _extract_end_reward():
+        #     for i, r in enumerate(rewards):
+        #         if len(end_reward) < i + 1:
+        #             end_reward.update({f'Agent{i}': [r[-1]]})
+        #         else:
+        #             end_reward[f'Agent{i}'].append(r[-1])
+        #     if len(end_reward) < n_agent + 1:
+        #         end_reward.update({'Global': [global_reward[-1]]})
+        #     else:
+        #         end_reward['Global'].append(global_reward[-1])
+        # _extract_end_reward()
 
     _store_cache()
 
@@ -407,7 +421,7 @@ def train_agent(comm_agent, agent):
     batch_cache['loss'].extend(loss)
 
 
-def plot_results(episode, results, config):
+def plot_results(episode, results, config, env):
     obs, actions, rewards, n_obs, dones, states, n_states, mus, danger_times = results
 
     algo = this_batch_algo
@@ -437,16 +451,9 @@ def plot_results(episode, results, config):
 
     colors = _set_canvas()
 
-    def _global_reward():
-        all_rewards = np.sum(rewards.squeeze(), axis=0)
-        return all_rewards / n_agent
-
-    rewards = rewards.reshape(n_agent, -1)
-    global_reward = _global_reward()
-
     def _rewards():
         fig, axes = plt.subplots(1, n_agent + 1, figsize=((n_agent + 1) * 6 + 2, 6))
-        for ax, label, reward, color in zip(axes, labels, (rewards[0], rewards[1], global_reward), colors):
+        for ax, label, reward, color in zip(axes, labels, rewards, colors):
             ax.plot(reward, color=color, label=label)
             ax.set_xlabel('Timestep')
             ax.set_ylabel('Reward')
@@ -464,7 +471,7 @@ def plot_results(episode, results, config):
 
     def _reward_in_one():
         plt.figure()
-        for label, reward, color in zip(labels, (rewards[0], rewards[1], global_reward), colors):
+        for label, reward, color in zip(labels, rewards, colors):
             plt.plot(reward, color=color, label=label)
         plt.legend()
         plt.xlabel('Timestep')
@@ -500,6 +507,7 @@ def plot_results(episode, results, config):
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Reward')
+
         for end_r, label, color in zip(exp_cache['rewards'][algo].values(), labels, colors):
             plt.plot(end_r, label=label, color=color)
         plt.legend()
@@ -557,8 +565,6 @@ def plot_results(episode, results, config):
                 plt.savefig(rootpath + batch_name + folder[1] + f'/EpisodeDanger.pdf')
         else:
             pass
-            # if episode % (tot_episode // 10) == 0:
-            #     plt.show()
         plt.close()
 
     def _comm_reward():
@@ -575,32 +581,62 @@ def plot_results(episode, results, config):
                 plt.savefig(rootpath + batch_name + folder[1] + f'/CommReward.pdf')
         else:
             pass
-            # if episode % (tot_episode // 10) == 0:
-            #     plt.show()
         plt.close()
 
-    _rewards()
-    _reward_in_one()
+    # _rewards()
+    # _reward_in_one()
     _end_reward()
 
     _losses()
 
-    _dangers_episode()
-    _dangers_batch()
+    if env.metadata['name'].find('risk') != -1:
+        _dangers_episode()
+        _dangers_batch()
 
     if algo.find('c') != -1:
         _comm_reward()
 
 
+def batch_summary():
+
+    def _rewards():
+        plt.figure()
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.title(this_batch_algo.upper())
+
+        with open(rootpath + batch_name + folder[0] + f'/{this_batch_algo}_rewards.csv', 'r') as f:
+            reader = csv.reader(f)
+            csv_header = next(reader)
+            csv_data = [row for row in reader if len(row) > 0]
+        csv_data = np.array(csv_data, dtype=np.float32).transpose()
+        colors = plt.colormaps.get_cmap('tab10').colors
+        plt.plot(csv_data[-1], color=colors[0])
+        plt.tight_layout()
+        if save_this_batch:
+            summary_path = rootpath + exp_name + '/' + this_batch_algo + '/'
+            if not os.path.exists(summary_path):
+                os.mkdir(summary_path)
+            plt.savefig(summary_path + f'/Reward.png')
+            if save_pdf:
+                plt.savefig(summary_path + f'/Reward.pdf')
+        else:
+            plt.show()
+        plt.close()
+
+    if save_this_batch:
+        _rewards()
+
+
 def exp_summary():
     def _reward():
-        last_rewards = {}
+        # last_rewards = {}
         plt.figure()
         plt.xlabel('Episode')
         plt.ylabel('Reward')
         colors = plt.colormaps.get_cmap('tab10').colors
         for algo, color in zip(exp_cache['rewards'].keys(), colors):
-            last_rewards.update({algo: exp_cache['rewards'][algo]['Global']})
+            # last_rewards.update({algo: exp_cache['rewards'][algo]['Global']})
             plt.plot(exp_cache['rewards'][algo]['Global'], label=algo, color=color, linewidth=1.5)
         plt.legend()
         plt.tight_layout()
@@ -611,7 +647,7 @@ def exp_summary():
             plt.savefig(summary_path + f'/Reward.png')
             if save_pdf:
                 plt.savefig(summary_path + f'/Reward.pdf')
-            sio.savemat(summary_path + '/rewards.mat', last_rewards)
+            # sio.savemat(summary_path + '/rewards.mat', last_rewards)
         else:
             plt.show()
         plt.close()
@@ -658,12 +694,9 @@ def exp_summary():
         plt.close()
 
     _reward()
-    _danger()
-    _comm()
+    # _danger()
+    # _comm()
 
 
 if __name__ == '__main__':
-    from scipy.io import loadmat
-
-    history = loadmat("D:/Master/Paper&Project/GMIX/results/12.01/4_MPEreference_newsave/c-gmix/data/results.mat")
-    print(type(history))
+    pass

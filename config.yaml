@@ -4,15 +4,15 @@ experiment:
     custom_file_handler_path: False
     file_handler_path: ''
   running:
-    seed: 1516
-    episode: 1000
+    seed: 1609
+    episode: 10
     timestep: 1000  # max_timestep, goto env param to set specific length
     buffer_size: 128
     batch_size: 32
     epoch: 1
     mode: 'exp' # ['exp', 'tune', 'debug']
     save_pdf: False
-    batches: ['gmix', 'qmix'] # ['qmix', 'c-qmix', 'gmix', 'c-gmix', 'vdn', 'iql']
+    batches: ['qmix'] # ['qmix', 'c-qmix', 'gmix', 'c-gmix', 'vdn', 'iql']
 
 model:
   hidden_l1_dim: 64
@@ -38,7 +38,7 @@ model:
 env:
   param: 'preset' # 'test', 'finetuned'
   env_name: 'mpe' # 'smac'
-  map_name: 'reference'
+  map_name: 'tag' # 'risk_ref', 'reference' ,'tag'
   seed: 0
   communicate: True
   msg_len: 10

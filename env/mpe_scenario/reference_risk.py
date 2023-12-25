@@ -36,7 +36,7 @@ class raw_env(SimpleEnv, EzPickle):
             continuous_actions=continuous_actions,
             local_ratio=local_ratio,
         )
-        self.metadata["name"] = "simple_reference_risk_v1"
+        self.metadata["name"] = "risk_ref"
 
 
 env = make_env(raw_env)

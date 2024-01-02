@@ -1,5 +1,0 @@
-max_cycles: 25
-num_good: 1
-num_adversaries: 3
-continuous_actions: False
-render_mode: None  # None  'human'  'rgb_array'

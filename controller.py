@@ -15,7 +15,7 @@ config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 
 
 if __name__ == '__main__':
-    info = 'test new maze env'  # add 'test' to open the debug mode
+    info = 'maze env'  # add 'test' to open the debug mode
 
     total_batch, seed, episode, seq_len, logger = running_config(config, info)
 
@@ -44,4 +44,4 @@ if __name__ == '__main__':
         #     tb = e.__traceback__
         #     traceback.print_tb(tb)
 
-    # exp_summary()
+    exp_summary()

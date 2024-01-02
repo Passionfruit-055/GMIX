@@ -6,7 +6,7 @@ from pettingzoo.mpe._mpe_utils.scenario import BaseScenario
 from pettingzoo.mpe._mpe_utils.simple_env import SimpleEnv, make_env
 from pettingzoo.utils.conversions import parallel_wrapper_fn
 
-from env.entities import DangerZone, DangerWorld, DangerPoint
+from env.mpe_scenario.entities import DangerZone, DangerWorld, DangerPoint
 
 __all__ = ["env", "parallel_env", "raw_env"]
 

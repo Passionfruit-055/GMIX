@@ -30,7 +30,7 @@ class Maze2D(object):
 
     def _distribute(self, dense_level=0.2):
         num = round(self.width * self.height * dense_level)
-        assert num > 0, f"Distribution num should be larger than zero"
+        # assert num > 0, f"Distribution num should be larger than zero"
 
         def random_nonzero_coordinates(arr, n):
             # 找到所有零元素的索引

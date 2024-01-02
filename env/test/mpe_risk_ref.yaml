@@ -1,4 +1,0 @@
-local_ratio: 0.5
-max_cycles: 200
-continuous_actions: False
-render_mode: None

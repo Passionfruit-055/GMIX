@@ -37,8 +37,8 @@ model:
 
 env:
   param: 'preset' # 'test', 'finetuned'
-  env_name: 'mpe' # 'smac'
-  map_name: 'tag' # 'risk_ref', 'reference' ,'tag'
+  env_name: 'maze' # 'smac' 'mpe' 'maze'
+  map_name: 'Basic2P' # ['risk_ref', 'reference' ,'tag'] ['Basic2P', ]
   seed: 0
   communicate: True
   msg_len: 10

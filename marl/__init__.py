@@ -5,10 +5,12 @@ import imageio
 import numpy as np
 from datetime import datetime
 import random
-import os
 import scipy.io as sio
 import torch
 from collections import deque
+import os
+
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"  # can assign any character,
 import pygame
 import csv
 
@@ -139,7 +141,7 @@ def one_batch_basic_preparation(config, env):
 
     _cache()
 
-    def _parse_this_batch():
+    def _parse_batch():
         if this_batch.find('mix') != -1:
             config['model'].update({'guide': False, 'comm': False})
             if this_batch.find('g') != -1:
@@ -149,7 +151,7 @@ def one_batch_basic_preparation(config, env):
                 config['model'].update({'comm': True})
                 logger.info(f"add communication")
 
-    _parse_this_batch()
+    _parse_batch()
 
     global need_guide, communicate
     need_guide = config['model'].get('guide', True)
@@ -209,10 +211,9 @@ def make_env(config):
         else:
             raise NotImplementedError(f"Undefined MPE map <{map_name}>!")
         # update env_config of mpe
-        agent_0_id = env.agents[0]
         scenario_config = {'agent_num': env.max_num_agents,
-                           'obs_space': env.observation_space(agent_0_id).shape[0],
-                           'action_space': env.action_space(agent_0_id).n,
+                           'obs_space': env.observation_space(env.agents[0]).shape[0],
+                           'action_space': env.action_space(env.agents[0]).n,
                            'state_space': env.state_space.shape[0],
                            'mpe_scenario': env_name + '_' + map_name
                            }
@@ -221,6 +222,18 @@ def make_env(config):
     elif env_name == 'smac':
         # TODO load smac
         pass
+
+    elif env_name == 'maze':
+        if map_name.find('Basic2P') != -1:
+            from env.maze.Basic2P import Basic2P
+            env = Basic2P(**env_config)
+        scenario_config = {'agent_num': env.agent_num,
+                           'obs_space': env.obs_space,
+                           'action_space': env.action_space,
+                           'state_space': env.state_space,
+                           'mpe_scenario': env_name + '_' + map_name
+                           }
+        config.update(scenario_config)
 
     else:
         raise NotImplementedError(f"Undefined env <{env_name}>")
@@ -242,22 +255,19 @@ def match_agent(config):
 def run_one_episode(seed, env, comm_agent, agent):
     results = []
     observations, infos = env.reset(seed)
-    n_agent = len(env.agents)
+    n_agent = len(env.agents) if hasattr(env.agents, 'len') else env.agent_num
     dones = [False for _ in range(n_agent)]
     agent.reset_hidden_state(seq_len=1)
     rewards = np.zeros((n_agent, 1))
+    global batch_cache
 
     while env.agents:
-        # save screen
-        # global screen_cache
-        # screen_cache.append(pygame.image.tobytes(env.unwrapped.screen, 'RGB'))
 
         done = False if False in dones else True
-        observations = np.array(list(observations.values()), dtype=np.float32)
+        observations = np.array(list(observations.values()), dtype=np.float32) if isinstance(observations, dict) else observations
 
         obs_new, comm_reward = comm_agent.communication_round(observations, rewards.copy(), done) if communicate else (
             torch.from_numpy(observations).to(agent.device), None)
-        global batch_cache
         if comm_reward is not None:
             for c_r in comm_reward:
                 batch_cache['comm_rewards'].append(c_r)
@@ -267,7 +277,12 @@ def run_one_episode(seed, env, comm_agent, agent):
         observations, rewards, terminations, truncations, infos = env.step(
             {agent: action for agent, action in zip(env.agents, actions)})  # 传进去的需要是一个字典
 
-        danger_times = env.unwrapped.world.danger_infos() if env.metadata["name"].find('risk') != -1 else None
+        if hasattr(env, 'unwrapped'):
+            danger_times = env.unwrapped.world.danger_infos() if env.metadata["name"].find('risk') != -1 else None
+        elif hasattr(env, 'danger_times'):
+            danger_times = env.danger_times
+        else:
+            raise NotImplementedError(f"Danger times report not implemented!")
 
         # utilities = agent.compute_utility(rewards, warning_signals)
         dones = list(map(lambda x, y: x or y, terminations.values(), truncations.values()))
@@ -275,8 +290,6 @@ def run_one_episode(seed, env, comm_agent, agent):
         # results.append([obs_new, actions, utilities, warning_signals, dones, danger_times])
         results.append([obs_new, actions, rewards, warning_signals, dones, danger_times])
 
-    # 如果在这里 close env，会将 pygame 一起关闭，所以将 close 转化为 reset
-    # env.close()
 
     return results  # return a whole episode
 
@@ -284,7 +297,7 @@ def run_one_episode(seed, env, comm_agent, agent):
 def store_results(episode, agent, results, env):
     n_agent = agent.n_agent
     seq_len = len(results)
-    obs, actions, rewards, mus, dones, danger_times, agents_in_danger = [], [], [], [], [], [], []
+    obs, actions, rewards, mus, dones, danger_times,  = [], [], [], [], [], []
     for result in results:
         for elem, category, c_name in zip(result, [obs, actions, rewards, mus, dones, danger_times],
                                           ['obs', 'actions', 'rewards', 'mus', 'dones', 'danger_times']):
@@ -392,10 +405,8 @@ def store_results(episode, agent, results, env):
                 writer.writerow(episode_end_reward)
 
         if save_this_batch:
-            # _save_to_mat()
-            # if len(screen_cache) > 0:
-            #     _save_frames_2_gif()
-            write_csv()
+            _save_to_mat()
+            # write_csv()
 
         # end_reward = exp_cache['rewards'][this_batch_algo]
         # def _extract_end_reward():
@@ -583,8 +594,8 @@ def plot_results(episode, results, config, env):
             pass
         plt.close()
 
-    # _rewards()
-    # _reward_in_one()
+    _rewards()
+    _reward_in_one()
     _end_reward()
 
     _losses()
@@ -598,7 +609,6 @@ def plot_results(episode, results, config, env):
 
 
 def batch_summary():
-
     def _rewards():
         plt.figure()
         plt.xlabel('Episode')
